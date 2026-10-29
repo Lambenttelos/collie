@@ -744,6 +744,51 @@ describe("the stub", () => {
       expect(treeOf(root)).toEqual(retried);
     });
 
+    it("keeps a case recorded after the failed case's first call listed when the good recording comes back", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const good = treeOf(root)["pi.a.jsonl"];
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      // pi.b passes while the answer the harness hung up on still streams.
+      stub.setCase("pi.b");
+      await hangUpAfterFirstEvent(stub, "stopped b");
+      expect((await post(stub, "pi.b", "pass")).status).toBe(204);
+      // pi.a makes its call, then pi.b's answer ends and pi.b is recorded.
+      stub.setCase("pi.a");
+      await ask(stub, piBody("flaky a"));
+      held.release();
+      await callsEnded(stub, 2);
+      expect(legOf(root).cases).toEqual(["pi.a", "pi.b"]);
+      // pi.a fails: its good recording comes back, and pi.b stays listed, so a replay loads it.
+      expect((await post(stub, "pi.a", "fail")).status).toBe(204);
+      expect(treeOf(root)["pi.a.jsonl"]).toBe(good);
+      expect(legOf(root).cases).toEqual(["pi.a", "pi.b"]);
+      expect(legOf(root).failed).toBeUndefined();
+      await stub.close();
+      const replay = await stubOn(root, fake, plan("pi", "replay"));
+      replay.setCase("pi.b");
+      expect((await ask(replay, piBody("stopped b"))).status).toBe(200);
+    });
+
+    it("keeps the other leg's entry in meta.json when a failed case puts its good recording back", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const stub = await stubOn(root, fake, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await ask(stub, piBody("flaky a"));
+      // The crew leg records into the same version folder meanwhile.
+      const crew = await startStub({ root, leg: "crew", plans: { pi: { ...plan("pi", "live", true), leg: "crew" } }, literals: [...LITERALS], upstream: fake.origin });
+      cleanups.push(() => crew.close());
+      crew.setCase("claude.x");
+      await ask(crew, piBody("crew x"));
+      expect((await post(stub, "pi.a", "fail")).status).toBe(204);
+      // SAFETY: meta.json is the stub's own JSON.stringify of a CassetteMeta (stub.ts writeMeta).
+      const legs = JSON.parse(readFileSync(join(dirOf(root), "meta.json"), "utf8")).legs as Record<string, { cases: string[] }>;
+      expect(legs.crew?.cases).toEqual(["claude.x"]);
+      expect(legs.solo?.cases).toEqual(["pi.a"]);
+    });
+
     it("writes and marks the new recording when the case fails and there is none, or the old one is already marked", async () => {
       const { root, fake } = await setup();
       await recordRun(root, fake, { "pi.a": { prompt: "bad a", verdict: "fail" } });

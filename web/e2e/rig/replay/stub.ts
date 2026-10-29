@@ -257,6 +257,17 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     return { caseText, metaText, good };
   };
 
+  /** True when meta.json `now` differs from `before` in the leg's `recordedAt` at most. */
+  const stampedOnly = (before: string, now: string): boolean => {
+    // SAFETY: as in writeMeta, meta.json is this file's own earlier output.
+    const was = JSON.parse(before) as CassetteMeta;
+    // SAFETY: as above.
+    const is = JSON.parse(now) as CassetteMeta;
+    const leg = is.legs[config.leg];
+    const stamp = was.legs[config.leg]?.recordedAt;
+    return leg !== undefined && stamp !== undefined && JSON.stringify({ ...is, legs: { ...is.legs, [config.leg]: { ...leg, recordedAt: stamp } } }) === JSON.stringify(was);
+  };
+
   const writeCase = (plan: TierPlan, rec: Recording) => {
     // A call still streaming when settleRecording put the earlier recording back holds a recording it dropped.
     if (plan.version === null || recordings.get(`${rec.harness}|${rec.caseId}`) !== rec) return;
@@ -277,7 +288,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
    *  - pass, no model call by this harness: its file and its meta entries are removed;
    *  - pass, with calls: the file is the new recording and the failed mark is cleared;
    *  - fail, and the file held a good recording (same model and skill, not marked failed): the old
-   *    file and the old meta come back, and one log line says so;
+   *    file comes back, meta.json too unless something else changed it since (stampedOnly), and one
+   *    log line says so;
    *  - fail otherwise: the new recording stays and the case is marked failed.
    */
   const settleRecording = (plan: TierPlan, caseId: string, verdict: string) => {
@@ -301,9 +313,12 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     if (plan.version === null) return;
     const dir = join(config.root, h, versionDir(plan.version));
     const file = join(dir, caseFile(caseId));
-    // A good recording had both files.
+    // A good recording had both files. It is listed and not marked failed in meta.json now as well, so
+    // meta.json goes back only when this case's writes changed nothing but its time stamp: the old
+    // file would drop a case recorded meanwhile (a call that ended late) or the other leg's entry.
     if (rec.before.caseText !== null) writeFileSync(file, rec.before.caseText);
-    if (rec.before.metaText !== null) writeFileSync(join(dir, "meta.json"), rec.before.metaText);
+    const metaFile = join(dir, "meta.json");
+    if (rec.before.metaText !== null && stampedOnly(rec.before.metaText, readFileSync(metaFile, "utf8"))) writeFileSync(metaFile, rec.before.metaText);
     written.delete(file);
     recordedCases.get(h)?.delete(caseId);
     failedCases.get(h)?.delete(caseId);
