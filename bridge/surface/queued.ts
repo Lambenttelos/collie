@@ -48,8 +48,8 @@ import type { RequestStore, SendRecord } from "./requests.ts";
 
 /**
  * The bound, as data. A queued card turns `unconfirmed` this long after the last read that saw the
- * pane's turn running (the submit key, before any read); a returned card this long after the last read
- * that saw it in the box; an unconfirmed card ends this long after it turned. The hold queue's 30
+ * pane's turn running ({@link Entry.at}, before any read); a returned card this long after the last
+ * read that saw it in the box; an unconfirmed card ends this long after it turned. The hold queue's 30
  * minutes is the precedent (holds.ts).
  */
 export const QUEUED_SEND_MS = 30 * 60_000;
@@ -76,7 +76,10 @@ interface Entry {
   readonly lines: readonly string[];
   /** The profile's collapse pattern at settle, or null: a long paste may come back folded. */
   readonly collapse: string | null;
-  /** When the submit key went out (settle time for a seeded entry), epoch ms. */
+  /**
+   * When the receipt settled (the read after the submit key that ended the send), epoch ms. An entry
+   * read back after a restart has its submit key's time instead, or its accept's when it has none.
+   */
   readonly at: number;
   state: QueuedSendState;
   /** The newest read that saw the pane's turn running (starts at {@link at}): the queued clock. */

@@ -4,7 +4,7 @@
 // do know: the Send Protocol keeps every open queued send with its text (bridge/surface/queued.ts).
 //
 // THE RULE: a queued send is a card until the journal shows its text as a prompt. A `user` turn the
-// window holds, written no earlier than the send's submit key (less a small clock skew), whose text
+// window holds, written no earlier than the send's settle (less a small clock skew), whose text
 // equals the send's text with white space folded, takes ONE send off the list, oldest first, the way
 // Claude Code's reducer lets one delivery clear one place. Two identical texts queued are two cards,
 // and one prompt clears one of them.
@@ -26,9 +26,11 @@ import type { TranscriptEntry } from "./types.ts";
 export type { ReceiptQueued };
 
 /**
- * How much earlier than a send's submit key a prompt's journal time may be and still count as that
- * send's. The journal's clock is the harness's and the receipt's is the bridge's, on one machine; the
- * slack covers a timestamp rounded down or written a moment ahead of the redraw.
+ * How much earlier than a send's `at` a prompt's journal time may be and still count as that send's.
+ * `at` is when the receipt settled: S2's first read after the harness took the text, so a prompt the
+ * harness writes as it takes the text is older by up to one S2 gap and that read (under 0.1 s when the
+ * box lets go at once). After a restart `at` is the submit key. The journal's clock is the harness's
+ * and the receipt's is the bridge's, on one machine; the slack also covers a timestamp rounded down.
  */
 export const PROMPT_SKEW_MS = 2_000;
 
@@ -55,7 +57,7 @@ function promptOf(entry: TranscriptEntry): { text: string; at: number } | null {
 
 /**
  * The sends still open after the journal: each send, oldest first, loses its card to the first
- * unclaimed prompt with its text written no earlier than its submit key less {@link PROMPT_SKEW_MS}.
+ * unclaimed prompt with its text written no earlier than its `at` less {@link PROMPT_SKEW_MS}.
  * A returned send counts too: its text landing as a prompt (sent at the desk, or from the card) ends it.
  */
 export function stillOpen(sends: readonly ReceiptQueued[], entries: readonly TranscriptEntry[]): ReceiptQueued[] {
