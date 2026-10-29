@@ -135,13 +135,17 @@ export async function askThroughJournal(call: GuardCall, session: GuardSession, 
     verdict = { allow: false, reason: "the arguments changed" };
   }
 
-  // The clock closes the ask on its own timer, so a phone that never answers does not keep the call for ever.
+  // The clock closes the ask on its own timer, so a phone that never answers does not keep the call for ever. The phone
+  // reads the ask as timed out from `expiresAt` on, and nothing else writes the timeout: a write that fails is made
+  // again after the next read that finds the ask still open.
   let expiry: ReturnType<typeof setTimeout> | undefined;
+  let expireAgain: (() => void) | undefined;
   if (verdict === undefined && expiresAt !== undefined) {
     const at = expiresAt;
-    expiry = setTimeout(() => {
-      if (!session.isFenced) void journal.appendJournal(runId, { t: "expire", askId, at, decidedBy: "timeout" }).catch(() => {});
-    }, Math.max(0, Date.parse(at) - Date.now()));
+    const expire = () => {
+      if (!session.isFenced) void journal.appendJournal(runId, { t: "expire", askId, at, decidedBy: "timeout" }).catch(() => void (expireAgain = expire));
+    };
+    expiry = setTimeout(expire, Math.max(0, Date.parse(at) - Date.now()));
   }
   let failedReads = 0;
   try {
@@ -161,6 +165,11 @@ export async function askThroughJournal(call: GuardCall, session: GuardSession, 
         continue;
       }
       verdict = verdictOf(records, askId, argsHash);
+      if (verdict === undefined && expireAgain !== undefined) {
+        const expire = expireAgain;
+        expireAgain = undefined;
+        expire();
+      }
     }
   } finally {
     if (expiry !== undefined) clearTimeout(expiry);

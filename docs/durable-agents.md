@@ -233,8 +233,9 @@ of a self-hosted process does the same at once. The
 question stays one question. If you pass a shorter `recoverAfterMs` to your open, a second live process
 can take the session from a live owner. Keep the default.
 
-Add `timeoutMs` to `withCollie` to give the phone a deadline. Past it, the question closes as timed
-out and the call is blocked.
+Add `timeoutMs` to `withCollie` to give the phone a deadline. Past it, the guard writes the timeout to the journal, the
+question closes as timed out and the call is blocked. If the World refuses that write, the guard writes it again after
+each read that still finds the question open.
 
 ### What it costs
 

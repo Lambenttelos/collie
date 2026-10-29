@@ -1,6 +1,7 @@
 // An in-memory World for the tests of the durable-harness entry (M66 spec 03): the four calls `world-port.ts` makes
 // (`runs.list`, `runs.get`, `streams.write`, `streams.getChunks`) and a session reader, with the faults a real World
-// has: a write that becomes visible to readers only later (staleness), a list that answers short pages, and an outage.
+// has: a write that becomes visible to readers only later (staleness), a list that answers short pages, an outage, and
+// an outage of writes alone.
 // The port under test is the real `createWorldPort`; only the World under it is fake.
 import { createWorldPort, type SessionView, type World, type WorldPort, type WorldPortOptions } from "../../../packages/durable-sdk/src/durable-harness/world-port.ts";
 
@@ -38,6 +39,8 @@ export class FakeWorld {
   readonly calls: string[] = [];
   /** True: every call throws, as an unreachable World does. */
   down = false;
+  /** True: every write throws while reads still answer, as a World that refuses writes for a moment does. */
+  writesDown = false;
   readonly o: FakeWorldOptions;
   private seq = 0;
   constructor(o: FakeWorldOptions = {}) {
@@ -49,6 +52,7 @@ export class FakeWorld {
   private touch(name: string) {
     this.calls.push(name);
     if (this.down) throw new Error("fake World: unreachable");
+    if (this.writesDown && name === "streams.write") throw new Error("fake World: write refused");
   }
 
   /** Add a run, and its session (empty unless given). Returns the run id. */
