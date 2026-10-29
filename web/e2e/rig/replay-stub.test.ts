@@ -890,6 +890,49 @@ describe("the stub", () => {
       expect(stub.stats().written).toEqual([join(dirOf(root), "pi.b.jsonl")]);
     });
 
+    it("waits at close for a call the harness hung up on, and writes it before close returns", async () => {
+      const { root } = await setup();
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      // The rig's teardown closes the stub while the answer of the last case's Stop still streams.
+      const closing = stub.close();
+      held.release();
+      await closing;
+      expect(stub.stats().harnesses.pi?.recorded).toBe(1);
+      expect(treeOf(root)["pi.a.jsonl"]).toContain("stopped a");
+    });
+
+    it("stops waiting at close after the given time, and logs the calls it left", async () => {
+      const { root } = await setup();
+      const held = await heldOpenRouter();
+      const lines: string[] = [];
+      const stub = await startStub({ root, leg: "solo", plans: plans(plan("pi", "live", true)), literals: [...LITERALS], upstream: held.origin, log: (line) => lines.push(line) });
+      cleanups.push(() => stub.close());
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      // A call that ended before close is not counted.
+      await ask(stub, piBody("first a"));
+      await stub.close(50);
+      expect(stub.stats().harnesses.pi?.recorded).toBe(1);
+      expect(lines.filter((line) => line.startsWith("close:"))).toEqual(["close: 1 recording call(s) still streaming after 50 ms; they are written only if they end before the process exits"]);
+      // The answer ends later and is still written, so the cleanup's close has nothing to wait for.
+      held.release();
+      await callsEnded(stub, 2);
+    });
+
+    it("does not wait at close for a live call that does not record", async () => {
+      const { root } = await setup();
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live"));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      const started = Date.now();
+      await stub.close(2_000);
+      expect(Date.now() - started).toBeLessThan(2_000);
+    });
+
     it("changes no cassette and no meta on a replay run, whatever the verdicts", async () => {
       const { root, fake } = await setup();
       await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" }, "pi.b": { prompt: "bad b", verdict: "fail" } });

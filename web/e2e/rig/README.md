@@ -376,6 +376,8 @@ A case that fails keeps an earlier good recording and logs one line.
 A good recording has the same model and skill, and no mark.
 Without a good recording, the failed case writes the new one and marks it.
 A case that runs again in the same run (`--retries`, `--repeat-each`) starts a new recording, settled by that attempt's verdict alone.
+At the rig's teardown the stub waits up to 15 s for recording calls still streaming, and a call that ends within that is still written.
+A hung-up Stop answer streams about 40 s in all, so a Stop in the last case can still lose that call; the stub's log says so.
 A replay run never changes a cassette.
 A harness version bump leaves the old `<version>` folder.
 Delete that folder in the same commit that records the new version.

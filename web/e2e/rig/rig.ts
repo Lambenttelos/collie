@@ -514,9 +514,10 @@ async function daemon(): Promise<void> {
       }
     }
     if (stub !== null) {
-      // The last counters, for a `down` that comes before the teardown read them (a crashed leg).
-      writeFileSync(P.stubStats, `${JSON.stringify(stub.stats(), null, 2)}\n`);
       await stub.close();
+      // The last counters, for a `down` that comes before the teardown read them (a crashed leg). After
+      // close, so they count a call it waited for.
+      writeFileSync(P.stubStats, `${JSON.stringify(stub.stats(), null, 2)}\n`);
     }
     for (const machine of machines.toReversed()) {
       const half = halfOf(run, machine);

@@ -98,7 +98,8 @@ export interface Stub {
   readonly port: number;
   setCase(caseId: string | null): void;
   stats(): StubStats;
-  close(): Promise<void>;
+  /** Stop listening and cut every connection, then wait up to `waitMs` (CLOSE_WAIT_MS) for recording calls still reading their answer, so they are written; log the ones it stops waiting for. */
+  close(waitMs?: number): Promise<void>;
 }
 
 /**
@@ -108,6 +109,14 @@ export interface Stub {
  * the error with its `cassette mismatch` text. The body's `cassette_mismatch` type is the label.
  */
 export const MISMATCH_STATUS = 422;
+
+/**
+ * How long close() waits for recording calls still reading their answer. `rig.ts down` gives the
+ * daemon's whole teardown 40 s, and stopping the bridges and Herdr after the stub takes part of that.
+ * The hung-up answers in the checked-in recordings (a Stop) stream 40 to 50 s in all, so a Stop in the
+ * last case can outlast it; close() logs that.
+ */
+const CLOSE_WAIT_MS = 15_000;
 
 /** The case id of a request that comes before the leg named a case (a harness start). A valid case id. */
 export const NO_CASE = "rig.before-first-case";
@@ -225,6 +234,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
   const failedCases = new Map<StubHarness, Set<string>>();
   /** Cases whose new recording was dropped at a failed verdict: their later calls are passed on, not recorded, until the leg names a case again. */
   const closed = new Set<string>();
+  /** Recording calls not ended yet: each writes its recording when its answer ends, so close() waits for them. */
+  const calls = new Set<Promise<void>>();
 
   const writeMeta = (plan: TierPlan) => {
     if (plan.version === null) return;
@@ -547,7 +558,11 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
       }
       const caseId = current ?? NO_CASE;
       if (plan.tier === "replay") await replay(plan.harness, machine, caseId, path, raw, res);
-      else await live(plan, machine, caseId, path, req, raw, res);
+      else {
+        const call = live(plan, machine, caseId, path, req, raw, res);
+        if (plan.record) calls.add(call);
+        await call.finally(() => calls.delete(call));
+      }
   };
 
   const server = createServer((req, res) => {
@@ -575,10 +590,12 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     port: bound,
     setCase: nameCase,
     stats: statsNow,
-    close: () =>
-      new Promise<void>((done) => {
-        server.closeAllConnections();
-        server.close(() => done());
-      }),
+    close: async (waitMs = CLOSE_WAIT_MS) => {
+      server.closeAllConnections();
+      await new Promise<void>((done) => server.close(() => done()));
+      // A call the harness hung up on (a Stop in the last case) reads its answer on to the end, and is written then.
+      const ended = await Promise.race([Promise.allSettled(calls).then(() => true), new Promise<boolean>((done) => setTimeout(() => done(false), waitMs).unref())]);
+      if (!ended) log(`close: ${String(calls.size)} recording call(s) still streaming after ${String(waitMs)} ms; they are written only if they end before the process exits`);
+    },
   };
 }
