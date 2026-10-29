@@ -31,6 +31,68 @@ describe("QueuedSends", () => {
     expect(cards.filter((card) => card.state === "queued")).toHaveLength(QUEUED_SENDS_MAX);
   });
 
+  test("the cap never splits a returned run: every text of the run keeps its card", () => {
+    const m = memory();
+    m.add("queued-run-0001", "first message");
+    m.clock.now += 10;
+    m.add("queued-run-0002", "second message");
+    m.clock.now += 1_000;
+    m.sends.boxRead("main", "%1", { box: "first message\nsecond message", at: m.clock.now, turn: "idle", poll: false });
+    expect(m.sends.of("main", "%1")).toMatchObject([{ requestId: "queued-run-0001", text: "first message\nsecond message", state: "returned" }]);
+    // The run is two entries: this many more sends push its oldest entry past the cap.
+    for (let i = 0; i < QUEUED_SENDS_MAX - 1; i++) {
+      m.clock.now += 10;
+      m.add(`queued-run-${String(i + 3).padStart(4, "0")}`, `message ${String(i)}`);
+    }
+    const cards = m.sends.of("main", "%1");
+    expect(cards.filter((card) => card.state !== "queued")).toMatchObject([
+      { requestId: "queued-run-0001", text: "first message", state: "unconfirmed" },
+      { requestId: "queued-run-0002", text: "second message", state: "unconfirmed" },
+    ]);
+    expect(cards.filter((card) => card.state === "queued")).toHaveLength(QUEUED_SENDS_MAX - 1);
+    expect(m.sends.dismissUnconfirmed("main", "%1", "queued-run-0001")).toBe(true);
+    expect(m.sends.of("main", "%1").filter((card) => card.state !== "queued")).toMatchObject([{ requestId: "queued-run-0002", text: "second message" }]);
+    // The run's clock is one: one bound after it turned, its last card ends too.
+    m.clock.now += QUEUED_SEND_MS - 1;
+    m.sends.boxRead("main", "%1", { box: "", at: m.clock.now, turn: "running", poll: true });
+    m.clock.now += 2;
+    expect(m.sends.of("main", "%1").filter((card) => card.state !== "queued")).toEqual([]);
+  });
+
+  test("a returned steer keeps a card when the cap turns its run unconfirmed", () => {
+    const m = memory();
+    m.add("queued-run-0101", "Q text");
+    m.clock.now += 100;
+    m.add("queued-run-0102", "S text", true);
+    m.clock.now += 1_000;
+    m.sends.boxRead("main", "%1", { box: "S text\n\nQ text", at: m.clock.now, turn: "idle", poll: false });
+    for (let i = 0; i < QUEUED_SENDS_MAX - 1; i++) {
+      m.clock.now += 10;
+      m.add(`queued-run-${String(i + 103).padStart(4, "0")}`, `message ${String(i)}`);
+    }
+    expect(m.sends.of("main", "%1").filter((card) => card.state !== "queued")).toMatchObject([
+      { requestId: "queued-run-0101", text: "Q text", state: "unconfirmed" },
+      { requestId: "queued-run-0102", text: "S text", state: "unconfirmed" },
+    ]);
+  });
+
+  test("a run led by a steer sent first keeps both cards past the cap", () => {
+    const m = memory();
+    m.add("queued-run-0201", "S text", true);
+    m.clock.now += 100;
+    m.add("queued-run-0202", "Q text");
+    m.clock.now += 1_000;
+    m.sends.boxRead("main", "%1", { box: "S text\n\nQ text", at: m.clock.now, turn: "idle", poll: false });
+    for (let i = 0; i < QUEUED_SENDS_MAX - 1; i++) {
+      m.clock.now += 10;
+      m.add(`queued-run-${String(i + 203).padStart(4, "0")}`, `message ${String(i)}`);
+    }
+    expect(m.sends.of("main", "%1").filter((card) => card.state !== "queued")).toMatchObject([
+      { requestId: "queued-run-0201", text: "S text", state: "unconfirmed" },
+      { requestId: "queued-run-0202", text: "Q text", state: "unconfirmed" },
+    ]);
+  });
+
   test("memory has an end: unconfirmed cards past twice the cap go, oldest first", () => {
     const m = memory();
     for (let i = 0; i < 3 * QUEUED_SENDS_MAX; i++) {

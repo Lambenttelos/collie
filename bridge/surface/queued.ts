@@ -14,7 +14,7 @@
 //                the card offers Send and Discard. Ends when a later read shows the box without it, on
 //                its Send or Discard, or when the journal shows the prompt.
 //
-// A STEER (a send whose receipt settled `steered`) is a candidate too, but never a card of its own: it
+// A STEER (a send whose receipt settled `steered`) is a candidate too, but no card of its own until the box gives it back: it
 // is not waiting for the turn to end, the harness takes it at the next step. It is kept only so that a
 // Stop which makes the harness give back its steers AND its queued texts together (steers first, then a
 // blank row, then the queue) can be matched as one run. A steer that was never seen in the box is
@@ -200,7 +200,7 @@ export class QueuedSends {
     for (const entry of mine) {
       if (entry.group !== undefined && entry.group !== entry.id) continue;
       // A steer that nobody gave back is no card: the harness took it, it does not wait.
-      if (entry.steer && entry.state !== "returned") continue;
+      if (entry.steer && entry.seenAt === undefined) continue;
       const run = this.runOf(entry, mine);
       cards.push({ requestId: entry.id, text: run.map((e) => e.text).join("\n"), at: entry.at, state: entry.state });
     }
@@ -315,10 +315,13 @@ export class QueuedSends {
     if (gone.size > 0) this.entries = this.entries.filter((entry) => !gone.has(entry));
   }
 
+  /** The entry turns unconfirmed with its whole run, each text its own card: the cap never leaves a run's other texts without one. */
   private unconfirm(entry: Entry, at: number): void {
-    entry.state = "unconfirmed";
-    entry.unconfirmedAt = at;
-    entry.group = undefined;
+    for (const member of this.runOf(entry, this.entries)) {
+      member.state = "unconfirmed";
+      member.unconfirmedAt = at;
+      member.group = undefined;
+    }
   }
 
   /**
