@@ -1498,9 +1498,10 @@ resumed on another machine at any point. It is therefore rerun-first: on every r
 journal, appends the `ask` only when there is none for this call, and polls the journal (1 s, doubling to 5 s) until a
 terminal record closes the ask. It lets the call run only on an `answer` whose option has the effect `allow`, for the
 same `argsHash`. `allow-always` is never offered behind a token (section 1B). Anything else blocks the call: a deny, an
-`expire`, other arguments, and a process that lost the session (Pi's `StorageFenced`), which is checked before every
-read, so a fenced process that sees an answer still does not run the tool. The hook appends the `expire` record of a
-timeout itself, on its own timer, at `expiresAt`.
+`expire`, other arguments, and a process that lost the session (Pi's `StorageFenced`, or a storage that writes nothing
+more: closed, abandoned, or after a commit that failed), which is checked before every read, so a fenced process that
+sees an answer still does not run the tool. The hook appends the `expire` record of a timeout itself, on its own
+timer, at `expiresAt`.
 
 ### A.3 The route
 

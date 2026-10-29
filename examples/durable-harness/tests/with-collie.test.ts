@@ -5,7 +5,7 @@ import { describe, expect, test } from "bun:test";
 import { createRegistry, defineExtension, type Harness, type Registry } from "@earendil-works/pi-durable";
 import { api } from "../../durable-member/tests/client.ts";
 import { paneIdOfRun } from "../../../packages/durable-sdk/src/durable-harness/pi-source.ts";
-import { askThroughJournal, GUARD, withCollie } from "../../../packages/durable-sdk/src/durable-harness/with-collie.ts";
+import { askThroughJournal, GUARD, type GuardSession, withCollie } from "../../../packages/durable-sdk/src/durable-harness/with-collie.ts";
 import type { WorldStorage } from "../../../packages/durable-sdk/src/durable-harness/world-port.ts";
 import { assistantEntry, FakeWorld, userEntry } from "./fake-world.ts";
 import { FakeSession, rig, until } from "./rig.ts";
@@ -45,7 +45,7 @@ describe("the guard's poll", () => {
   const FAST = { pollMs: { first: 5, max: 20 } };
   const idle = { eventCount: 4, entries: [userEntry(1, "refund 5521"), assistantEntry(3, "On it.")] };
   const reads = (w: FakeWorld) => w.calls.filter((c) => c === "streams.getChunks").length;
-  const guardOn = (w: FakeWorld, run: string, session: FakeSession, errors: number[] = []) =>
+  const guardOn = (w: FakeWorld, run: string, session: GuardSession, errors: number[] = []) =>
     askThroughJournal({ id: "call-1", name: "refund", arguments: { order: "5521" } }, session, w.port(), { ...FAST, onReadError: (_e, n) => errors.push(n) });
 
   test("a read that fails twice inside the wait is retried: the answer that follows still allows", async () => {
@@ -76,6 +76,42 @@ describe("the guard's poll", () => {
     session.fence();
     expect(await decided).toEqual({ block: "this process lost the session" });
     expect(reads(r.world)).toBe(before);
+  });
+
+  test("a session that ends without a fence ends the wait: no read after it", async () => {
+    const r = rig();
+    const run = r.world.addRun({ session: idle });
+    const ended = new AbortController();
+    let cap = Number.POSITIVE_INFINITY; // a backstop fence, so a guard that keeps reading stops after 50 reads
+    const session: GuardSession = { sessionId: run, get isFenced() { return reads(r.world) > cap; }, signal: ended.signal };
+    const decided = guardOn(r.world, run, session);
+    await until("the ask in the journal", () => (r.world.chunks.size > 0 ? true : undefined));
+    const before = reads(r.world);
+    cap = before + 50;
+    ended.abort(); // closed, abandoned or after a failed commit: the storage writes nothing more, and it is not fenced
+    expect(await decided).toEqual({ block: "this process lost the session" });
+    expect(reads(r.world)).toBe(before);
+  });
+
+  test("a session that has already ended blocks the call without writing an ask", async () => {
+    const r = rig();
+    const run = r.world.addRun({ session: idle });
+    const ended = new AbortController();
+    ended.abort();
+    let n = 0; // a backstop fence, so a guard that ignores the ended session stops after 60 checks
+    const session: GuardSession = { sessionId: run, get isFenced() { return ++n > 60; }, signal: ended.signal };
+    expect(await guardOn(r.world, run, session)).toEqual({ block: "this process lost the session" });
+    expect(r.world.chunks.size).toBe(0);
+  });
+
+  test("a stop of the call still throws while the session lives: it is not the lost-session block", async () => {
+    const r = rig();
+    const run = r.world.addRun({ session: idle });
+    const stop = new AbortController();
+    const decided = askThroughJournal({ id: "call-1", name: "refund", arguments: { order: "5521" } }, new FakeSession(run), r.world.port(), FAST, stop.signal);
+    await until("the ask in the journal", () => (r.world.chunks.size > 0 ? true : undefined));
+    stop.abort(new Error("the turn was stopped"));
+    await expect(decided).rejects.toThrow("the turn was stopped");
   });
 
   test("the first read, before the wait, still throws when the World is down: nothing is written", async () => {

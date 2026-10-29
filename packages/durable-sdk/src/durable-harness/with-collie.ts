@@ -6,7 +6,7 @@
 // so everything it knows is in the run's journal (`<runId>_collie`), never in this process. A risky call reads the
 // journal; appends its `ask` if the journal does not hold one yet; polls the journal (1 s, then up to 5 s apart; a failed read is retried, never a verdict) until
 // a terminal record closes the ask; and allows the call only on an `answer` whose option allows it, for the same
-// arguments. A timeout, other arguments, a stop, or this process losing the session (`StorageFenced`) deny.
+// arguments. A timeout, other arguments, a stop, or this process losing the session (`StorageFenced`, or its storage ending) deny.
 //
 // `takeoverControls(open)` is how the route's send and stop reach a session it does not hold: take it over, act on its
 // root conversation, let go. Erasable TypeScript only, so Node runs it as it is.
@@ -95,7 +95,7 @@ export interface GuardCall {
 export interface GuardSession {
   readonly sessionId: string;
   readonly isFenced: boolean;
-  /** Aborted once the storage writes nothing more: closed, abandoned or fenced. */
+  /** Aborted once the storage writes nothing more: closed, abandoned, fenced, or after a commit that failed. */
   readonly signal: AbortSignal;
 }
 
@@ -114,7 +114,8 @@ export async function askThroughJournal(call: GuardCall, session: GuardSession, 
   const argsHash = sha256Hex(JSON.stringify(args ?? null));
   const spec = toAskSpec({ toolName: call.name, args, words: o.words });
   const signal = stop === undefined ? session.signal : AbortSignal.any([stop, session.signal]);
-  const fenced = (): Verdict | undefined => (session.isFenced ? { allow: false, reason: "this process lost the session" } : undefined);
+  // A session that ended without a fence (closed, abandoned, a failed commit) is lost too: `sleep` no longer waits.
+  const fenced = (): Verdict | undefined => (session.isFenced || session.signal.aborted ? { allow: false, reason: "this process lost the session" } : undefined);
 
   let records = await journal.readJournal(runId);
   let verdict = fenced() ?? verdictOf(records, askId, argsHash);
