@@ -41,9 +41,10 @@ export interface ClearReceipt {
   readonly reason?: ClearReason;
   /**
    * Set on `cleared` when the box held text: the draft as the read before the press showed it, one line
-   * (the box's rows joined with a space), at most {@link CLEAR_DRAFT_MAX_BYTES}. The phone keeps it for a
-   * Restore. It is the operator's own text, behind the same write gate as the tap: the bridge never logs
-   * it and never puts it on the audit line.
+   * (the box's rows joined as best the screen tells, so a space at a wrap can go missing: ADR 0116's
+   * addendum of 2026-10-29), at most {@link CLEAR_DRAFT_MAX_BYTES}. The phone keeps it for a Restore. It
+   * is the operator's own text, behind the same write gate as the tap: the bridge never logs it and never
+   * puts it on the audit line.
    */
   readonly draft?: string;
 }

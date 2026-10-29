@@ -325,9 +325,10 @@ not. The button is greyed when the box is empty, a dialog is open or the link is
 does not empty Collie leaves what remains alone and does not press again.
 
 After a Clear, the notice offers **Restore** for two minutes. One tap types the text back into the
-box, as one line and without Enter, so nothing is sent. Restore goes away once you type in the box
-again or open another pane. The bridge keeps the cleared text in memory with the Clear's receipt,
-and never writes it to a log or to disk.
+box, as one line and without Enter, so nothing is sent. Restore types the text as the screen showed
+it: on a wrapped draft, a space where the row broke can go missing. Restore goes away once you type
+in the box again or open another pane. The bridge keeps the cleared text in memory with the Clear's
+receipt, and never writes it to a log or to disk.
 
 ## Your own key presets
 

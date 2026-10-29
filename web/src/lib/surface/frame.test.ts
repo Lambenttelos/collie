@@ -909,8 +909,9 @@ describe("a box at its scroll height (`idle.frame.scroll`, omp gang 2026-10-25)"
 
 // omp-gang 11-geometry, W4 (2026-10-25): the Clear receipt's Restore text had a space at every soft wrap, so a
 // CJK draft of 67 characters came back with 68 and a 140-character URL with 141. A harness wraps a draft at a
-// break and drops the break, and wraps inside a token only for a token wider than a row (a URL) and for a run
-// of double-width cells (CJK text has no spaces). The join keeps one space everywhere else.
+// break and drops the break, and wraps inside a token for a token wider than a row (a URL) and for a run of
+// double-width cells (Hangul too, which omp cuts between any two cells). The join keeps one space everywhere
+// else it can tell. Where the screen draws the same rows either way it guesses the cut (`brokeToken`).
 describe("the draft of a soft-wrapped box joins the rows the way they were broken (omp-gang 11-geometry, W4)", () => {
   const OMP = requireProfile("omp").idle;
   const WIDTH = 80;
@@ -950,10 +951,15 @@ describe("the draft of a soft-wrapped box joins the rows the way they were broke
     expect(draftOf([row, "next words here"])).toBe(`${row} next words here`);
   });
 
-  it("two long words at a full row's edge are two words: only a token wider than a row has no space", () => {
+  it("two long words at a full row's edge keep their space while they fit a row together (46 + 31: the 77 cells a row holds)", () => {
     const left = `${"a".repeat(30)} ${"b".repeat(46)}`;
     expect(displayWidth(`╰─ ${left}`)).toBe(WIDTH);
-    expect(draftOf([left, `${"c".repeat(30)} tail`])).toBe(`${left} ${"c".repeat(30)} tail`);
+    expect(draftOf([left, `${"c".repeat(31)} tail`])).toBe(`${left} ${"c".repeat(31)} tail`);
+  });
+
+  it("two words that each fit a row but not together, the first ending on the last cell, read as one token cut there: the space goes (46 + 32, the guess)", () => {
+    const left = `${"a".repeat(30)} ${"b".repeat(46)}`;
+    expect(draftOf([left, `${"c".repeat(32)} tail`])).toBe(`${left}${"c".repeat(32)} tail`);
   });
 
   it("a draft typed with newlines keeps a space for each: the rows end short", () => {
@@ -974,6 +980,15 @@ describe("the draft of a soft-wrapped box joins the rows the way they were broke
 
   it("Korean text, which has spaces, keeps the space where a row ends short of the width", () => {
     expect(draftOf(["안녕하세요 세계 여러분", "다음 줄입니다"])).toBe("안녕하세요 세계 여러분 다음 줄입니다");
+  });
+
+  it("a Korean word that ends two cells short of the width keeps its space; one cell short it reads as a cut and loses it (the guess)", () => {
+    const twoShort = `${"가나다 ".repeat(9)}라마바사자아`;
+    expect(displayWidth(`╰─ ${twoShort}`)).toBe(WIDTH - 2);
+    expect(draftOf([twoShort, "다음 줄입니다"])).toBe(`${twoShort} 다음 줄입니다`);
+    const oneShort = `${"가나다 ".repeat(10)}라마바`;
+    expect(displayWidth(`╰─ ${oneShort}`)).toBe(WIDTH - 1);
+    expect(draftOf([oneShort, "다음 줄입니다"])).toBe(`${oneShort}다음 줄입니다`);
   });
 
   it("rows that are not one padded rectangle join as they always did", () => {

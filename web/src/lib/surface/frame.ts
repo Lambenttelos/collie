@@ -63,8 +63,9 @@ export interface Frame {
     /** The last row inside the edges (`bottom - 1`). */
     readonly last: number;
     /** The draft as one line: the hole on the prompt row, then each non-blank wrapped row, trimmed
-     *  and joined with one space. Empty for an empty box. Holds the placeholder text when
-     *  `placeholder` is true. */
+     *  and joined with one space, or with none where {@link brokeToken} reads the wrap as a cut inside
+     *  a token, a guess where the screen draws the same rows either way. Empty for an empty box. Holds
+     *  the placeholder text when `placeholder` is true. */
     readonly text: string;
   };
   /** True when the interior shows the profile's placeholder: one of its texts, or nothing but runs
@@ -477,17 +478,27 @@ function paddedRows(texts: readonly string[], pieces: readonly DraftPiece[]): { 
  * Whether the soft wrap between two rows of a draft broke inside a token, so the draft has no space there.
  *
  * A harness wraps a draft at a break and drops the break: a row that ends at a word ends short of the
- * width, or exactly on it when the word fills it. It wraps inside a token in two cases, and each leaves a
- * mark on the screen:
+ * width, or exactly on it when the word fills it. It wraps inside a token in two cases, and the join
+ * reads each from the screen:
  * - a token wider than a row (a URL, a long path) is cut where the row is full. The token's end on this
- *   row and its start on the next are together wider than the room a row has. A row that is full where a
- *   word ends has two short words at its edge, which are not;
- * - a run with double-width cells (CJK text has no spaces) is cut at the last cell that fits, so the row
- *   ends one cell short at most, and both sides of the cut are double-width cells. A newline typed
- *   after a CJK line that fills the row to within a cell, ahead of a narrow glyph, keeps its space.
+ *   row and its start on the next are together wider than the room a row has. Two words that fit a row
+ *   together are not, so they keep their space;
+ * - a run with double-width cells is cut at the last cell that fits, so the row ends one cell short at
+ *   most, and both sides of the cut are double-width cells. A newline typed after a CJK line that fills
+ *   the row to within a cell, ahead of a narrow glyph, keeps its space.
  * The join adds a space unless one of these holds. A row's end counts as full against the width of the
- * padded rows ({@link paddedRows}); a row with a right border or a margin is never full, and joins as
- * before.
+ * padded rows ({@link paddedRows}). A row with a right border or a margin never meets the first case, so
+ * a URL cut there gains a space it never had. A border and its padding miss the second case too, so a
+ * CJK run gains one as well; a one-cell margin (omp's `pi` shape) still meets it, so there a CJK run
+ * reads back right and only a URL gains a space.
+ *
+ * Both are guesses: the screen does not always show which wrap happened. Two words that each fit a row
+ * but together do not, the first ending on the last cell, draw the same rows as one token cut there
+ * (omp 18.13.3, `band` shape, 80 columns: 30 a's, 46 b's and 32 c's read back as `bbbccc`). Korean puts
+ * spaces between words, and omp cuts Hangul between any two double-width cells, so a Korean word that
+ * ends on the last cell or one short of it draws the same rows as a word cut there, and its space is
+ * lost. The join takes the cut: a URL or a CJK run always draws it, two words only when the first ends
+ * on the last cell.
  */
 function brokeToken(texts: readonly string[], rect: { readonly width: number; readonly indent: number }, before: DraftPiece, after: DraftPiece, left: string, right: string): boolean {
   if (after.row !== before.row + 1) return false;
