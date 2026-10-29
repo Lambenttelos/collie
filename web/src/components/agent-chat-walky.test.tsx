@@ -1,7 +1,7 @@
 import { useState, type ComponentProps } from "react";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { http, HttpResponse } from "msw";
-import userEvent from "@testing-library/user-event";
+import userEvent, { type UserEvent } from "@testing-library/user-event";
 import { createMemoryRouter, RouterProvider } from "react-router";
 
 // The pane's Messages row and sheet inside the real pane view (M62): where the row is offered, and
@@ -15,6 +15,8 @@ vi.mock("@/lib/liveness", async (importOriginal) => ({
 }));
 
 import { fixtureAgents, fixtureWalkyAgent, fixtureWalkyOperator, fixtureWalkySent, paneTextWithDraft, recordedWalkyPosts } from "@/test/handlers";
+import { __resetOperatorCommands, loadOperatorCommands } from "@/lib/operator-config";
+import { loadDraft } from "@/lib/drafts";
 import { withHeaderHost } from "@/test/header-host";
 import { server } from "@/test/msw";
 import type { AgentView } from "@/lib/types";
@@ -139,6 +141,113 @@ describe("the pane's Messages row and sheet", () => {
     goGone();
     expect(screen.getByText("Tests are green on fix-465. You can merge.")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^Reply to/ })).toBeNull();
+  });
+});
+
+// A durable conversation (ADR 0099) has no screen, so it mounts its own composer. Walky talky still
+// delivers to it, and its Messages sheet offers Reply on an agent's message (docs/walky-talky.md).
+describe("the Messages sheet of a pane with no screen", () => {
+  // A program's panes live in its own named session, and its multiplexer declares no pane grid. The
+  // program declares Steer, so a case can press it.
+  const scope = { session: "pi" };
+  beforeEach(async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({ push: false, vapidPublicKey: "", mux: { name: "reference", capabilities: { paneGrid: false, steerTurn: true }, unsupportedKeys: [], notes: {} } }),
+      ),
+    );
+    await loadOperatorCommands();
+  });
+  afterEach(() => __resetOperatorCommands());
+
+  /** Run one case, and give back the path of every POST it made, oldest first. */
+  async function postsDuring(run: (posts: readonly string[]) => Promise<void>): Promise<string[]> {
+    const posts: string[] = [];
+    const listen = ({ request }: { request: Request }) => {
+      if (request.method === "POST") posts.push(new URL(request.url).pathname);
+    };
+    server.events.on("request:start", listen);
+    try {
+      await run(posts);
+    } finally {
+      server.events.removeListener("request:start", listen);
+    }
+    return posts;
+  }
+
+  /** Open the sheet, tap Reply on the agent's message, and send `body` from the conversation's box. */
+  async function replyAndSend(user: UserEvent, field: HTMLElement, body: string) {
+    await openMessages(user);
+    await user.click(await screen.findByRole("button", { name: "Reply to collie-workspace#fix-465" }));
+    await user.type(field, body);
+    await user.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(recordedWalkyPosts()).toHaveLength(1));
+  }
+
+  it("opens a Reply that goes to the sender through the walky route, never into the conversation", async () => {
+    const user = userEvent.setup();
+    const posts = await postsDuring(async () => {
+      renderPane({ scope });
+      const field = await screen.findByPlaceholderText("Message this conversation");
+      await openMessages(user);
+      await user.click(await screen.findByRole("button", { name: "Reply to collie-workspace#fix-465" }));
+      // The strip above the box names the sender, as on a pane with a screen.
+      await waitFor(() => expect(document.querySelector('[data-slot="walky-aim"]')).toHaveTextContent("Reply to collie-workspace#fix-465"));
+      await user.type(field, "Seen it");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(recordedWalkyPosts()).toHaveLength(1));
+      // The bridge took it: the line above the box says so, the box and the saved draft empty, and the strip goes.
+      await waitFor(() => expect(document.querySelector('[data-slot="walky-note"]')).toHaveTextContent(/^Message to collie-workspace#fix-465: /));
+      expect(field).toHaveValue("");
+      expect(loadDraft(scope, agent.paneId)).toBeNull();
+      await waitFor(() => expect(screen.queryByText("Reply to collie-workspace#fix-465")).toBeNull());
+      await user.click(screen.getByRole("button", { name: "Dismiss" }));
+      await waitFor(() => expect(screen.queryByText(/^Message to collie-workspace#fix-465: /)).toBeNull());
+    });
+    expect(recordedWalkyPosts()[0]).toMatchObject({ to: fixtureWalkyAgent.from.address, replyTo: fixtureWalkyAgent.id, body: "Seen it" });
+    expect(posts).toEqual(["/api/walky"]);
+  });
+
+  it("sends a reply to the sender even with Steer pressed", async () => {
+    // The switch is the conversation's: a reply is not for its turn, and the walky route has no steer.
+    const user = userEvent.setup();
+    const posts = await postsDuring(async () => {
+      renderPane({ scope, agent: { ...agent, status: "working", turnId: "turn-7" } });
+      const field = await screen.findByPlaceholderText("Message this conversation");
+      await user.click(await screen.findByRole("button", { name: /Steer the running turn/ }));
+      await replyAndSend(user, field, "Seen it");
+    });
+    expect(posts).toEqual(["/api/walky"]);
+    expect(recordedWalkyPosts()[0]).not.toHaveProperty("steer");
+  });
+
+  it("sends a reply to the sender from a conversation on a crew member too", async () => {
+    // A member's program takes its own send route rather than the Send Protocol; the reply still takes neither.
+    const user = userEvent.setup();
+    const host = "workshop";
+    const posts = await postsDuring(async () => {
+      renderPane({ scope: { ...scope, host }, agent: { ...agent, host } });
+      await replyAndSend(user, await screen.findByPlaceholderText("Message this conversation"), "Seen it");
+    });
+    expect(posts).toEqual(["/api/walky"]);
+    expect(recordedWalkyPosts()[0]).toMatchObject({ to: fixtureWalkyAgent.from.address, replyTo: fixtureWalkyAgent.id, body: "Seen it" });
+  });
+
+  it("sends into the conversation again once the reply strip is turned off", async () => {
+    const user = userEvent.setup();
+    const posts = await postsDuring(async (seen) => {
+      renderPane({ scope });
+      const field = await screen.findByPlaceholderText("Message this conversation");
+      await openMessages(user);
+      await user.click(await screen.findByRole("button", { name: "Reply to collie-workspace#fix-465" }));
+      await user.click(await screen.findByRole("button", { name: "Send as a plain reply again" }));
+      await waitFor(() => expect(screen.queryByText("Reply to collie-workspace#fix-465")).toBeNull());
+      await user.type(field, "Carry on");
+      await user.click(screen.getByRole("button", { name: "Send" }));
+      await waitFor(() => expect(seen).toHaveLength(1));
+    });
+    expect(recordedWalkyPosts()).toHaveLength(0);
+    expect(posts).toEqual(["/api/send"]);
   });
 });
 

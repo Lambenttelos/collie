@@ -3143,8 +3143,10 @@ export function AgentChat({
                 {gridless ? (
                   // The composer of a pane with no screen: text goes through the send route with the
                   // turn the phone saw, and a Stop control posts the abort route. The keys bar, the
-                  // Type button and the terminal-draft machinery are not mounted (ADR 0101).
+                  // Type button and the terminal-draft machinery are not mounted (ADR 0101). It takes
+                  // the same handle, so the thread's tap and the Messages sheet's Reply reach it.
                   <DurableComposer
+                    ref={composerRef}
                     paneId={paneId}
                     scope={scope}
                     turnId={agent?.turnId}

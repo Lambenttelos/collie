@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useImperativeHandle, useRef, useState, type ReactNode, type Ref } from "react";
 import { Check, Loader2, Send, Settings2 } from "lucide-react";
 
 import { ActionsRow, type GeneralAction, type Hand } from "@/components/actions-row";
+import type { ComposerHandle } from "@/components/composer";
 import { useDurableBarItems } from "@/components/harness-bar";
 import { Button } from "@/components/ui/button";
 import { ChatInput } from "@/components/ui/chat/chat-input";
@@ -10,6 +11,8 @@ import { useLocale } from "@/hooks/use-locale";
 import { SendRefusalNotice, phoneRefusal, programRefusal, type SendRefusal } from "@/components/send-notice";
 import { NOTICE_ACTION } from "@/components/ui/notice";
 import { Collapse } from "@/components/ui/collapse";
+import { WalkyAimStrip, WalkyNoteStrip } from "@/components/walky-composer-strip";
+import { useWalkyComposer } from "@/hooks/use-walky-composer";
 import { abortPane, apiErrorStatus, postProgramSend, runPaneAction, sendToPane, type ControlResult } from "@/lib/api";
 import { describeThrownError } from "@/lib/api-error-message";
 import { takeBeltIntent } from "@/lib/belt-intent";
@@ -88,8 +91,14 @@ import { mintRequestId } from "@/lib/worktree-name";
 //
 // The belt keeps what is not about a screen: the Display button and the program's own section. The
 // Keys, Type, Quick and Zoom buttons are not drawn, because there is nothing to type into or zoom.
+//
+// A REPLY FROM THE MESSAGES SHEET (M62) is not for this conversation. The pane's sheet hands the sender
+// to this composer through the terminal composer's own handle: the strip names the sender, and Send
+// takes the text to that pane through the bridge's walky route, as an operator message.
 
 export interface DurableComposerProps {
+  /** The handle the pane view reaches the box with: the thread's tap and the Messages sheet's Reply. */
+  ref?: Ref<ComposerHandle>;
   paneId: string;
   scope?: Scope;
   /** What the pane has shown that a control may name: its newest turn and its open asks. */
@@ -155,6 +164,7 @@ export function DurableComposer({
   onSent,
   onReload,
   onAnswerDialog,
+  ref,
 }: DurableComposerProps) {
   useLocale();
   const [input, setInput] = useState(() => loadDraft(scope, paneId) ?? "");
@@ -189,6 +199,26 @@ export function DurableComposer({
     field.current?.focus();
   }, [sending]);
 
+  // A Reply from the pane's Messages sheet (M62). The draft goes once the bridge took the message.
+  const walky = useWalkyComposer({
+    paneId,
+    scope,
+    onTaken: () => {
+      setInput("");
+      clearDraft(scope, paneId);
+    },
+  });
+  // A tap on the thread puts the caret at the end of the box, as on a pane with a screen. Reply only aims
+  // the box: the sheet hands the focus back to its opener as it closes.
+  function focusInput() {
+    const box = field.current;
+    if (box === null) return;
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+  const startMessage = walky.startMessage;
+  useImperativeHandle(ref, () => ({ focusInput, startMessage }), [startMessage]);
+
   const barItems = useDurableBarItems(scope, actions);
   const target = controlTarget({ turnId, asks });
   const canSteer = steerOffered(status);
@@ -205,6 +235,10 @@ export function DurableComposer({
   async function send() {
     const text = input.trim();
     if (text === "" || off || sending) return;
+    if (walky.aim !== null) {
+      await walky.sendMessage(text);
+      return;
+    }
     if (textRouteFor({ program: true, crew: !isLead(scope), sendProtocol }, steerNow) === "api-send") {
       await sendThroughProtocol(text);
       return;
@@ -396,6 +430,13 @@ export function DurableComposer({
         changes={changesPill}
         hand={hand}
       />
+      {/* Where a reply is going and what became of it (M62): the terminal composer's own strips. */}
+      <Collapse open={walky.aim !== null}>
+        {walky.aim !== null && <WalkyAimStrip aim={walky.aim} onCancel={walky.clearAim} />}
+      </Collapse>
+      <Collapse open={walky.note !== null}>
+        {walky.note !== null && <WalkyNoteStrip note={walky.note} onDismiss={walky.dismissNote} />}
+      </Collapse>
       {/* What became of a Send Protocol request, at the thumb: the terminal composer's own notice. */}
       <Collapse open={refusal !== null}>
         {refusal !== null && (

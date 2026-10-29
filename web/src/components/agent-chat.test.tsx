@@ -742,6 +742,24 @@ describe("AgentChat — raw-terminal escape hatch", () => {
     expect(document.activeElement).not.toBe(screen.getByPlaceholderText(/Type a reply/i));
   });
 
+  it("focuses the conversation's own composer, caret at the end, on a tap on a pane with no screen", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({ push: false, vapidPublicKey: "", mux: { name: "reference", capabilities: { paneGrid: false }, unsupportedKeys: [], notes: {} } }),
+      ),
+    );
+    await loadOperatorCommands();
+    const { container } = renderChat({ scope: { session: "pi" } });
+    const field = await screen.findByPlaceholderText<HTMLTextAreaElement>("Message this conversation");
+    // A half-written line, with the caret left at its start.
+    fireEvent.change(field, { target: { value: "half a thought" } });
+    field.setSelectionRange(0, 0);
+    expect(field).not.toHaveFocus();
+    fireEvent.click(container.querySelector<HTMLElement>('[data-slot="pane-reading"]')!);
+    await waitFor(() => expect(field).toHaveFocus());
+    expect(field.selectionStart).toBe("half a thought".length);
+  });
+
   it("still lifts a menu into buttons with Tap to type off — it gates focus, not the grammars", async () => {
     localStorage.setItem(
       "collie:display-prefs:v4",

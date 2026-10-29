@@ -194,6 +194,13 @@ A tap names the newest turn the phone saw. When the conversation has moved on, n
 phone says so: "The conversation moved on, so the action did not run." Check it, then tap the button
 again if you still want it.
 
+### Messages
+
+[Walky talky](walky-talky.md) messages reach a durable agent's pane too, and its menu has the Messages
+row. Reply on an agent's message works as on any pane: the strip above the box names the sender, and
+Send takes your text to that pane as a message from you, not into this conversation. Tap "Send as a
+plain reply again" on the strip to write to the conversation instead.
+
 ### What a durable agent pane does not have
 
 A durable agent has no screen, so its pane has no Terminal view, no tab or pane strips, and no Keys, Type
