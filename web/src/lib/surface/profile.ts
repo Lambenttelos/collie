@@ -348,6 +348,15 @@ export interface FrameLayout {
    * place starts at the box's own column. Optional, 1 or more.
    */
   readonly draftIndent?: number;
+  /**
+   * The cells the harness leaves at the right end of a draft row it fills: where it cuts a token wider than
+   * a row, or a run of double-width cells, the row's text stops this many cells short of the screen's last
+   * column, and the draft's join reads that as a full row. pi keeps the last column for its cursor (pi-tui's
+   * editor with no padding: 79 cells at 80 columns, pi 0.87.1), and OMP's `pi` shape keeps one cell after
+   * its one-cell indent (18.13.3). A row that ends in the box's right border keeps as many cells as the box
+   * draws in front of its draft instead. Optional, 1 or more; without it a full row ends on the last column.
+   */
+  readonly rightMargin?: number;
   readonly maxDraftRows: number;
   /** How many rows above the last non-blank row the bottom edge may sit (the frame module's
    *  search bound, M56 spec 03): the tallest thing the harness draws under a live box. */
@@ -1314,7 +1323,8 @@ function parseFrame(frameNode: JsonObject): FrameLayout {
   const maxWidgetRows = frameNode.maxWidgetRows === undefined ? undefined : whole(frameNode.maxWidgetRows, "idle.frame.maxWidgetRows", 1);
   const withWidgets = maxWidgetRows === undefined ? anchors : { ...anchors, maxWidgetRows };
   const withIndent = frameNode.draftIndent === undefined ? withWidgets : { ...withWidgets, draftIndent: whole(frameNode.draftIndent, "idle.frame.draftIndent", 1) };
-  const base = frameNode.scroll === undefined ? withIndent : { ...withIndent, scroll: parseScroll(frameNode.scroll, maxDraftRows) };
+  const withMargin = frameNode.rightMargin === undefined ? withIndent : { ...withIndent, rightMargin: whole(frameNode.rightMargin, "idle.frame.rightMargin", 1) };
+  const base = frameNode.scroll === undefined ? withMargin : { ...withMargin, scroll: parseScroll(frameNode.scroll, maxDraftRows) };
   if (walk === "edges") {
     for (const key of ["rows", "trailer", "continuation", "ownPrompt", "maxWidgetRows"] as const) {
       if (frameNode[key] !== undefined) fail(`idle.frame.${key}`, "belongs to the interior walk");

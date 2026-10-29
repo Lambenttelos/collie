@@ -364,6 +364,8 @@ interface DraftPiece {
   readonly row: number;
   readonly start: number;
   readonly end: number;
+  /** Set when the row ends in a glyph the profile's pattern names as a right border (its `border` group). */
+  readonly border?: true;
 }
 
 /**
@@ -386,6 +388,16 @@ function trimmedPiece(row: number, text: string, from: number, to: number): Draf
   if (trimmed.length === 0) return null;
   const start = from + (slice.length - slice.trimStart().length);
   return { row, start, end: start + trimmed.length };
+}
+
+/**
+ * The piece from `from` to `to` on a row a pattern with a `border` group matched: up to the end of that
+ * group where the cut was wrong ({@link keptBorder}), and marked {@link DraftPiece.border} when the group
+ * matched at all.
+ */
+function borderedPiece(row: number, text: string, match: RegExpExecArray, from: number, to: number): DraftPiece | null {
+  const piece = trimmedPiece(row, text, from, keptBorder(text, match) ?? to);
+  return piece !== null && match.indices?.groups?.border !== undefined ? { ...piece, border: true } : piece;
 }
 
 /** The run attributes that make a style, beside the foreground colour. */
@@ -457,28 +469,58 @@ const startsWide = (text: string): boolean => widePieces(text)[0]?.wide === true
 /** No terminal is narrower than this; a read of narrower rows is a hand-cut one. */
 const MIN_WRAP_WIDTH = 20;
 
+/** The end of a top edge drawn to the last column: a rule, `─` or the `-` of omp's `ascii` symbols. */
+const RULE_END = /[─-]$/u;
+
+/** Where the rows of a soft-wrapped draft are full ({@link draftArea}). */
+interface DraftArea {
+  /** The screen's width in cells. */
+  readonly width: number;
+  /** The cells in front of the draft on its narrowest row: the prompt glyph, the indent, or a box's left border and its padding. */
+  readonly indent: number;
+  /** The cells a full row leaves before the screen's last column (`idle.frame.rightMargin`). */
+  readonly margin: number;
+}
+
 /**
- * What the rows of a soft-wrapped draft say about the screen they were drawn on: the width every row was
- * padded to, and the cells in front of the draft on the narrowest row (the prompt glyph or the indent).
- * Null when the draft's rows are not padded to the screen's width, so a hand-cut or trimmed read joins as it always did.
- * Rows within two cells of the width count as full width, because a harness may measure a glyph one
- * cell differently from {@link displayWidth}.
+ * What the rows of a soft-wrapped draft say about the screen they were drawn on: its width, and the cells in
+ * front of the draft on the narrowest row. The width is the screen's widest row, and a read shows it one of
+ * two ways:
+ * - a Herdr read pads every row to the width, the draft's too. Rows within two cells of it count as full
+ *   width, because a harness may measure a glyph one cell differently from {@link displayWidth};
+ * - a tmux read cuts the trailing spaces off every row (`capture-pane` without `-N`). The frame's top edge
+ *   still shows the width when it is the widest row and ends in a rule ({@link RULE_END}). A top edge that
+ *   ends in text or an icon may stop short of the last column (omp's `minimal` preset, its running status
+ *   row), so it shows nothing. A box drawn to the last column needs no top edge: its rows end in its border
+ *   there, so they read as padded. The edges walk passes no top edge (`null`) and reads padded rows only.
+ * Null when neither holds, so every wrap keeps a space.
  */
-function paddedRows(texts: readonly string[], pieces: readonly DraftPiece[]): { readonly width: number; readonly indent: number } | null {
+function draftArea(texts: readonly string[], top: number | null, pieces: readonly DraftPiece[], margin: number): DraftArea | null {
   if (pieces.length < 2) return null;
-  const widths = pieces.map((piece) => displayWidth(texts[piece.row]!));
-  // The screen's width is its widest row: a capture pads every row, the draft's too. Rows that are as
-  // short as the draft is long (a screen with its trailing spaces cut) say nothing about a full row.
   const width = Math.max(...texts.map(displayWidth));
-  if (width < MIN_WRAP_WIDTH || widths.some((w) => w < width - 2)) return null;
-  return { width, indent: Math.min(...pieces.map((piece) => displayWidth(texts[piece.row]!.slice(0, piece.start)))) };
+  if (width < MIN_WRAP_WIDTH) return null;
+  const padded = pieces.every((piece) => displayWidth(texts[piece.row]!) >= width - 2);
+  const edge = top === null ? "" : texts[top]!;
+  if (!padded && (displayWidth(edge) !== width || !RULE_END.test(edge))) return null;
+  return { width, indent: Math.min(...pieces.map((piece) => displayWidth(texts[piece.row]!.slice(0, piece.start)))), margin };
+}
+
+/**
+ * The cell past the last one a draft row's text can fill: the screen's width less the layout's margin, or,
+ * on a row that ends in a box's right border on the last column ({@link DraftPiece.border}), less as many
+ * cells as the box draws in front of its draft (omp's `│  ` and `  │`). A border glyph short of the last
+ * column is the person's text, which a read with its trailing spaces cut does not keep ({@link keptBorder}).
+ */
+function rowEdge(texts: readonly string[], area: DraftArea, piece: DraftPiece): number {
+  const boxed = piece.border === true && displayWidth(texts[piece.row]!.trimEnd()) === area.width;
+  return area.width - (boxed ? area.indent : area.margin);
 }
 
 /**
  * Whether the soft wrap between two rows of a draft broke inside a token, so the draft has no space there.
  *
- * A harness wraps a draft at a break and drops the break: a row that ends at a word ends short of the
- * width, or exactly on it when the word fills it. It wraps inside a token in two cases, and the join
+ * A harness wraps a draft at a break and drops the break: a row that ends at a word ends short of the row's
+ * right edge, or exactly on it when the word fills the row. It wraps inside a token in two cases, and the join
  * reads each from the screen:
  * - a token wider than a row (a URL, a long path) is cut where the row is full. The token's end on this
  *   row and its start on the next are together wider than the room a row has. Two words that fit a row
@@ -486,26 +528,26 @@ function paddedRows(texts: readonly string[], pieces: readonly DraftPiece[]): { 
  * - a run with double-width cells is cut at the last cell that fits, so the row ends one cell short at
  *   most, and both sides of the cut are double-width cells. A newline typed after a CJK line that fills
  *   the row to within a cell, ahead of a narrow glyph, keeps its space.
- * The join adds a space unless one of these holds. A row's end counts as full against the width of the
- * padded rows ({@link paddedRows}). A row with a right border or a margin never meets the first case, so
- * a URL cut there gains a space it never had. A border and its padding miss the second case too, so a
- * CJK run gains one as well; a one-cell margin (omp's `pi` shape) still meets it, so there a CJK run
- * reads back right and only a URL gains a space.
+ * The join adds a space unless one of these holds. A row's end counts as full against its own right edge
+ * ({@link rowEdge}): the screen's last column, the layout's margin short of it (pi keeps the last column for
+ * its cursor, omp's `pi` shape keeps one cell), or the cell before a box's right border and its padding.
+ * Where the read does not show the screen's width ({@link draftArea}), every wrap keeps its space.
  *
  * Both are guesses: the screen does not always show which wrap happened. Two words that each fit a row
- * but together do not, the first ending on the last cell, draw the same rows as one token cut there
+ * but together do not, the first ending on the row's last cell, draw the same rows as one token cut there
  * (omp 18.13.3, `band` shape, 80 columns: 30 a's, 46 b's and 32 c's read back as `bbbccc`). Korean puts
  * spaces between words, and omp cuts Hangul between any two double-width cells, so a Korean word that
  * ends on the last cell or one short of it draws the same rows as a word cut there, and its space is
  * lost. The join takes the cut: a URL or a CJK run always draws it, two words only when the first ends
- * on the last cell.
+ * on the row's last cell.
  */
-function brokeToken(texts: readonly string[], rect: { readonly width: number; readonly indent: number }, before: DraftPiece, after: DraftPiece, left: string, right: string): boolean {
+function brokeToken(texts: readonly string[], area: DraftArea, before: DraftPiece, after: DraftPiece, left: string, right: string): boolean {
   if (after.row !== before.row + 1) return false;
-  const slack = rect.width - displayWidth(texts[before.row]!.slice(0, before.end));
+  const edge = rowEdge(texts, area, before);
+  const slack = edge - displayWidth(texts[before.row]!.slice(0, before.end));
   const end = lastToken(left);
   const start = firstToken(right);
-  if (slack === 0 && displayWidth(end) + displayWidth(start) > rect.width - rect.indent) return true;
+  if (slack === 0 && displayWidth(end) + displayWidth(start) > edge - area.indent) return true;
   return slack <= 1 && endsWide(end) && startsWide(start);
 }
 
@@ -513,16 +555,18 @@ function brokeToken(texts: readonly string[], rect: { readonly width: number; re
  * The draft as one line: each piece's text joined with one space, unless the wrap between two rows broke
  * inside a token ({@link brokeToken}), with the profile's ghost text cut off the end of the last piece
  * ({@link hintStart}). A draft typed with newlines has rows that end short, and keeps a space for each.
+ * `top` is the frame's top edge row on the interior walk, null on the edges walk, and `margin` the layout's
+ * `rightMargin` ({@link draftArea}).
  */
-function draftText(rows: readonly FrameRow[], texts: readonly string[], pieces: readonly DraftPiece[], hint: ReadonlySet<string> | null): string {
+function draftText(rows: readonly FrameRow[], texts: readonly string[], pieces: readonly DraftPiece[], hint: ReadonlySet<string> | null, top: number | null, margin: number): string {
   const last = pieces[pieces.length - 1];
   const ghost = last === undefined || hint === null ? null : hintStart(rows[last.row]!, last, hint);
   const parts = pieces.map((piece) => ({ piece, text: texts[piece.row]!.slice(piece.start, piece === last && ghost !== null ? ghost : piece.end).trim() })).filter((part) => part.text.length > 0);
-  const rect = paddedRows(texts, parts.map((part) => part.piece));
+  const area = draftArea(texts, top, parts.map((part) => part.piece), margin);
   let out = "";
   for (const [i, part] of parts.entries()) {
     const before = parts[i - 1];
-    out += before === undefined ? part.text : `${rect !== null && brokeToken(texts, rect, before.piece, part.piece, before.text, part.text) ? "" : " "}${part.text}`;
+    out += before === undefined ? part.text : `${area !== null && brokeToken(texts, area, before.piece, part.piece, before.text, part.text) ? "" : " "}${part.text}`;
   }
   return out.trim();
 }
@@ -711,7 +755,7 @@ export function frameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePro
     const piece = trimmedPiece(j, texts[j]!, 0, texts[j]!.length);
     if (piece !== null) pieces.push(piece);
   }
-  const text = draftText(rows, texts, pieces, c.hint);
+  const text = draftText(rows, texts, pieces, c.hint, null, idle.frame.rightMargin ?? 0);
   anchorsHit.push("bottom");
 
   const placeholder = readPlaceholder(rows, prompt, holeStart, bottom - 1, text, idle, c.placeholderFg, anchorsHit);
@@ -750,7 +794,7 @@ function interiorPiece(row: number, text: string, continuation: RegExp | null): 
   const hit = continuation.exec(text.trimEnd());
   const span = hit?.indices?.groups?.text;
   if (hit === null || span === undefined) return null;
-  return trimmedPiece(row, text, span[0], keptBorder(text, hit) ?? span[1]);
+  return borderedPiece(row, text, hit, span[0], span[1]);
 }
 
 /**
@@ -830,10 +874,10 @@ function interiorFrameAt(rows: readonly FrameRow[], bottom: number, idle: IdlePr
   const holeStart = promptMatch.indices?.groups?.draft?.[0] ?? texts[prompt]!.length;
   const pieces: DraftPiece[] = [];
   for (let j = top + 1; j <= last; j++) {
-    const piece = j === prompt ? trimmedPiece(j, texts[j]!, holeStart, keptBorder(texts[j]!, promptMatch) ?? holeStart + (hole ?? "").length) : interiorPiece(j, texts[j]!, c.interior.continuation);
+    const piece = j === prompt ? borderedPiece(j, texts[j]!, promptMatch, holeStart, holeStart + (hole ?? "").length) : interiorPiece(j, texts[j]!, c.interior.continuation);
     if (piece !== null) pieces.push(piece);
   }
-  const text = draftText(rows, texts, pieces, c.hint);
+  const text = draftText(rows, texts, pieces, c.hint, top, idle.frame.rightMargin ?? 0);
   // A list pushed the harness's own row down: only the typed command's own list may stand there.
   if (listed && openListUnder(texts, bottom, text, idle.volatile.below.commandList) === null) return null;
 

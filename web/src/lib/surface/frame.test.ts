@@ -42,6 +42,12 @@ function fixtureRows(name: string): StyledLine[] {
   return rows;
 }
 
+/** A fixture as tmux reads it: `capture-pane -p -e` without `-N` cuts the trailing spaces off every row. */
+function trimmedFixtureRows(name: string): StyledLine[] {
+  const raw = readFileSync(join(PANES_DIR, name), "utf8");
+  return splitLines(parseAnsi(raw.split("\n").map((line) => line.replace(/ +$/u, "")).join("\n")));
+}
+
 interface PinnedFrame {
   top: number;
   prompt: number;
@@ -779,10 +785,11 @@ describe("frame alternates (M56 spec 14)", () => {
 
 // Issue 497 (omp 18.11.3, the box composer, captured 2026-10-18): the box draws its right border on
 // every draft row, a wrapped row ends in `│` or `─╯` with fewer than eight spaces before it, and the
-// word completion paints a ghost suffix after the cursor. The draft reads as typed all the same.
+// word completion paints a ghost suffix after the cursor. The draft reads as typed all the same, to the
+// space: a path cut at the box's right edge (`│  ` and `  │` around it) joins with none, and so it does
+// in a read with its trailing spaces cut.
 describe("omp 18.11's box composer (issue 497)", () => {
   const OMP = requireProfile("omp").idle;
-  const squeeze = (text: string): string => text.replace(/\s+/gu, "");
   const WRAP =
     "Collie wrap probe: the quick brown fox jumps over the lazy dog while the phone sends a long single line that must wrap " +
     "across two rows of the omp box at one hundred and thirty columns wide, ending here.";
@@ -806,7 +813,8 @@ describe("omp 18.11's box composer (issue 497)", () => {
     const frame = findInputFrame(fixtureRows(fixture), OMP);
     expect(frame).not.toBeNull();
     expect(frame!.placeholder).toBe(false);
-    expect(squeeze(frame!.interior.text)).toBe(squeeze(typed));
+    expect(frame!.interior.text).toBe(typed);
+    expect(findInputFrame(trimmedFixtureRows(fixture), OMP)?.interior.text).toBe(typed);
   });
 
   // The ghost rule, on one prompt row built as omp paints it: `╰─ `, the draft in the text colour, the
@@ -996,9 +1004,11 @@ describe("the draft of a soft-wrapped box joins the rows the way they were broke
     expect(findInputFrame(rows, OMP)?.interior.text).toBe(`${"x".repeat(77)} ${"y".repeat(10)}`);
   });
 
-  it("a screen with its trailing spaces cut says nothing about a full row: two equal-length lines typed with a newline keep the space", () => {
-    const rows = plainRows(["", " π > ◒ Haiku 4.5 > 📁 ~/work ▶─6%─┃200K─".padEnd(80), `╰─ ${"x".repeat(40)}`, `   ${"y".repeat(40)}`]);
-    expect(findInputFrame(rows, OMP)?.interior.text).toBe(`${"x".repeat(40)} ${"y".repeat(40)}`);
+  it("draft rows with their trailing spaces cut, under a top edge that only spaces pad to the width, say nothing about a full row: lines typed with a newline keep the space", () => {
+    const top = " π > ◒ Haiku 4.5 > 📁 ~/work ▶─6%─┃200K─".padEnd(80);
+    expect(findInputFrame(plainRows(["", top, `╰─ ${"x".repeat(40)}`, `   ${"y".repeat(40)}`]), OMP)?.interior.text).toBe(`${"x".repeat(40)} ${"y".repeat(40)}`);
+    // A line that fills the row to the last column: the padded top edge is as wide, but its rule stops at column 40.
+    expect(findInputFrame(plainRows(["", top, `╰─ ${"x".repeat(77)}`, `   ${"y".repeat(10)}`]), OMP)?.interior.text).toBe(`${"x".repeat(77)} ${"y".repeat(10)}`);
   });
 
   it("narrower terminals, 40 columns: the URL cut and the CJK run cut both hold", () => {
@@ -1008,5 +1018,90 @@ describe("the draft of a soft-wrapped box joins the rows the way they were broke
     const cjk = "日本語のテキストをここに入力して、ボックスの幅を確認します。これは二行目以降です。";
     // 18 double-width characters fill 36 of the 37 cells: omp cuts the run one cell short.
     expect(draftOf([cjk.slice(0, 18), cjk.slice(18, 36), cjk.slice(36)], 40)).toBe(cjk);
+  });
+
+  // A tmux read (`capture-pane -p -e`, no `-N`) cuts the trailing spaces off every row, so the draft's rows no
+  // longer show the width. The top edge still does: omp's status row ends in its gauge on the last column.
+  const URL140 = `https://example.com/${"abcdefghij".repeat(12)}`;
+  const CJK67 = "日本語のテキストをここに入力して、ボックスの幅の計算が正しいかどうかを確認します。全角文字は二つのセルを占めます。これは七十文字です。";
+
+  it("a read with its trailing spaces cut: the real URL and CJK captures still come back whole, measured against the top edge", () => {
+    expect(findInputFrame(trimmedFixtureRows("omp--v18-12-6-draft-url-wrapped--w80.txt"), OMP)?.interior.text).toBe(URL140);
+    expect(findInputFrame(trimmedFixtureRows("omp--v18-6-1-draft-cjk-wrapped--w80.txt"), OMP)?.interior.text).toBe(CJK67);
+  });
+
+  it("an ASCII rule's hyphen ends a top edge as `─` does (omp's `ascii` symbols, the status row of a real capture)", () => {
+    const ascii = fixtureRows("omp--v18-12-6-status-ascii-draft--w80.txt");
+    const top = lineText(ascii[findInputFrame(ascii, OMP)!.top]!).trimEnd();
+    expect(top.endsWith("-") && displayWidth(top) === WIDTH).toBe(true);
+    expect(findInputFrame(plainRows(["", top, `╰─ ${URL140.slice(0, 77)}`, `   ${URL140.slice(77)}`]), OMP)?.interior.text).toBe(URL140);
+  });
+
+  it("a status row that ends in an icon or text shows no width in a trimmed read: it may stop short of the last column (the `minimal` preset, the running row)", () => {
+    for (const name of ["omp--v18.11.1-minimal-idle--w120.txt", "omp--v18-6-steer-after--w120.txt"]) {
+      const rows = fixtureRows(name);
+      const top = lineText(rows[findInputFrame(rows, OMP)!.top]!).trimEnd();
+      // Each capture's status row stops a cell short of the pane; here it is the widest row, and the draft's first row is as wide.
+      expect(displayWidth(top), name).toBe(Math.max(...rows.map((row) => displayWidth(lineText(row)))) - 1);
+      const words = `${"a".repeat(20)} ${"b".repeat(displayWidth(top) - 24)}`;
+      expect(findInputFrame(plainRows(["", top, `╰─ ${words}`, `   ${"c".repeat(25)} tail`]), OMP)?.interior.text, name).toBe(`${words} ${"c".repeat(25)} tail`);
+    }
+  });
+
+  it("a top rule one cell narrower than the widest row shows no width in a trimmed read: a row wider than the rule cannot be under a rule drawn to the last column", () => {
+    const top = " π > ◒ Haiku 4.5 > 📁 ~/work ▶─6%─┃200K─";
+    const x = "x".repeat(displayWidth(top) - 2);
+    expect(findInputFrame(plainRows(["", top, `╰─ ${x}`, `   ${"y".repeat(10)}`]), OMP)?.interior.text).toBe(`${x} ${"y".repeat(10)}`);
+  });
+
+  it("a border glyph the person typed short of the last column is no box's border: the row is measured against the screen's edge", () => {
+    const top = ` π > ◒ Haiku 4.5 > 📁 ~/work ▶─6%─┃200K─${"─".repeat(40)}`;
+    expect(displayWidth(top)).toBe(WIDTH);
+    // 74 x's end three cells short of the edge, where a box's text would end; a read with its trailing spaces cut drops the `│`.
+    expect(findInputFrame(plainRows(["", top, `╰─ ${"x".repeat(74)} │`, `   ${"y".repeat(10)}`]), OMP)?.interior.text).toBe(`${"x".repeat(74)} ${"y".repeat(10)}`);
+  });
+
+  // Synthetic rows, laid out as live captures drew them at 80 columns on 2026-10-29 (Herdr-style padded and
+  // tmux-style trimmed): omp 18.13.3 with `composer.shape: box` puts its text inside `│  ` and `  │`, 74 cells a
+  // row; with `composer.shape: pi` it fills a row from its one-cell indent through the 79th column, and pi 0.87.1,
+  // which keeps the last column for its cursor, from the first column through the 79th (`idle.frame.rightMargin`).
+  const RULE80 = "─".repeat(WIDTH);
+  const fill = (text: string, columns: number): string => text + " ".repeat(Math.max(0, columns - displayWidth(text)));
+  const padded = (texts: readonly string[]): FrameRow[] => plainRows(texts.map((text) => fill(text, WIDTH)));
+  const trimmed = (texts: readonly string[]): FrameRow[] => plainRows(texts.map((text) => text.trimEnd()));
+  /** omp's `composer.shape: box`: the top edge, each draft row inside `│  ` and `  │`, the last one inside `╰─ ` and ` ─╯`. */
+  const ompBox = (draft: readonly string[]): string[] => {
+    const top = "╭── π > ◒ Haiku 4.5 > 📁 ~/work ▶─1%─┃200K";
+    return ["", `${top}${"─".repeat(WIDTH - 1 - displayWidth(top))}╮`, ...draft.map((row, i) => (i < draft.length - 1 ? `│  ${fill(row, 74)}  │` : `╰─ ${fill(row, 74)} ─╯`))];
+  };
+  /** omp's `composer.shape: pi`: a rule over and under the draft, each draft row behind a one-cell indent, the status row under it. */
+  const ompPiLayout = (draft: readonly string[]): string[] => ["", RULE80, ...draft.map((row) => ` ${row}`), RULE80, " π · ◒ Haiku 4.5 · 📁 ~/work · ◫ 1.2%/1M"];
+  /** pi's editor: a rule over and under the draft, the draft from the first column, the working directory and the footer under it. */
+  const piEditor = (draft: readonly string[]): string[] => [RULE80, ...draft, RULE80, "~/work", "0.0%/1.0M (auto)                                        claude-opus-4-6 • medium"];
+
+  it("omp's `box` shape: a CJK run cut at the box's right edge comes back whole, padded or trimmed", () => {
+    for (const read of [padded, trimmed]) expect(findInputFrame(read(ompBox([CJK67.slice(0, 37), CJK67.slice(37)])), OMP)?.interior.text).toBe(CJK67);
+  });
+
+  it("omp's `box` shape: two words that fit its 74-cell row together keep their space (44 + 30); one cell more reads as a cut (44 + 31, the guess)", () => {
+    const left = `${"a".repeat(29)} ${"b".repeat(44)}`;
+    expect(displayWidth(left)).toBe(74);
+    expect(findInputFrame(padded(ompBox([left, `${"c".repeat(30)} tail`])), OMP)?.interior.text).toBe(`${left} ${"c".repeat(30)} tail`);
+    expect(findInputFrame(padded(ompBox([left, `${"c".repeat(31)} tail`])), OMP)?.interior.text).toBe(`${left}${"c".repeat(31)} tail`);
+  });
+
+  it("omp's `pi` shape keeps one cell at each end of a row: the URL and the CJK run come back whole, padded or trimmed", () => {
+    for (const read of [padded, trimmed]) {
+      expect(findInputFrame(read(ompPiLayout([URL140.slice(0, 78), URL140.slice(78)])), OMP)?.interior.text).toBe(URL140);
+      expect(findInputFrame(read(ompPiLayout([CJK67.slice(0, 39), CJK67.slice(39)])), OMP)?.interior.text).toBe(CJK67);
+    }
+  });
+
+  it("pi 0.87.1 keeps the last column for its cursor: the URL and the CJK run come back whole, padded or trimmed", () => {
+    const PI = requireProfile("pi").idle;
+    for (const read of [padded, trimmed]) {
+      expect(findInputFrame(read(piEditor([URL140.slice(0, 79), URL140.slice(79)])), PI)?.interior.text).toBe(URL140);
+      expect(findInputFrame(read(piEditor([CJK67.slice(0, 39), CJK67.slice(39)])), PI)?.interior.text).toBe(CJK67);
+    }
   });
 });

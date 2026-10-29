@@ -86,6 +86,7 @@
         },
         "under": "^\\s*\\S.*·",
         "continuationIndent": 0,
+        "rightMargin": 1,
         "maxDraftRows": 30,
         "maxTailRows": 3
       },
