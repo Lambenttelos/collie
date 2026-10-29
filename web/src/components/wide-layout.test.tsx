@@ -11,6 +11,7 @@ import { ROOT_ROUTE_ID, type HomeData, type PaneData } from "@/lib/loaders";
 import { panePath } from "@/lib/nav";
 import { readAgentLaunch } from "@/lib/agent-startup";
 import { __resetOpenBeside } from "@/lib/open-beside";
+import { __resetOperatorCommands, loadOperatorCommands } from "@/lib/operator-config";
 import { paneScopeKey } from "@/lib/scope";
 import { statusLabel, type AgentView, type DeviceAuth, type TabView } from "@/lib/types";
 import { __resetWideLayoutStore, setWideLayoutMode } from "@/lib/wide-layout-store";
@@ -168,6 +169,7 @@ afterEach(() => {
   device = undefined;
   vi.unstubAllGlobals();
   __resetWideLayoutStore();
+  __resetOperatorCommands();
 });
 
 async function mount(paneId: string, px: number, tall = 900) {
@@ -382,6 +384,42 @@ describe("the strip", () => {
     // The tap left its act for that pane's own composer, and for no other pane.
     expect(takeBeltIntent(key(A2))).toBeNull();
     expect(takeBeltIntent(key(A1))).toEqual({ kind: "action", id: "keys" });
+  });
+
+  it("a column of a pane with no screen draws only the pills it can hand on, and hands Display to that pane", async () => {
+    // A durable program's panes: no screen to type into or zoom, no folder on this machine to show
+    // (ADR 0101), and no harness section even where an operator bar row addresses every agent. The pane
+    // offers every terminal-belt pill a column can draw (Sent aside, a shell's), and the column draws
+    // only the one its composer takes: Display.
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({
+          push: false,
+          vapidPublicKey: "",
+          mux: { name: "reference", capabilities: { paneGrid: false }, unsupportedKeys: [], notes: {} },
+          operatorCommands: [{ command: "/review", description: "", takesArg: false, argHint: "", bar: true }],
+        }),
+      ),
+    );
+    await loadOperatorCommands();
+    const D1: AgentView = {
+      ...pane("w3:p1", "w3", "desk"),
+      agent: "durable",
+      canStop: true,
+      todos: [{ id: "1", text: "Run tests", status: "pending" }],
+      subagents: [{ agentId: "a1", description: "triage" }],
+    };
+    const D2: AgentView = { ...pane("w3:p2", "w3", "desk"), agent: "durable" };
+    extraAgents = [D1, D2];
+    const { container, router } = await mount("w3:p1", 1200);
+    await openBesideFromSidebar(container, D2);
+    const other = columns(container)[0]!;
+    const belt = q(other, '[data-slot="chrome-block"]')!;
+    expect(within(belt).getAllByRole("button").map((button) => button.getAttribute("aria-label") ?? button.textContent)).toEqual(["Display settings"]);
+    expect(q(other, '[data-slot="harness-bar"]')).toBeNull();
+    fireEvent.click(within(other).getByRole("button", { name: "Display settings" }));
+    await waitFor(() => expect(router.state.location.pathname).toBe(panePath("w3:p1")));
+    expect(takeBeltIntent(key(D1))).toEqual({ kind: "action", id: "display" });
   });
 
   it("a tap on a column without focus gives it the focus", async () => {

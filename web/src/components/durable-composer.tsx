@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Check, Loader2, Send, Settings2 } from "lucide-react";
 
-import { ActionsRow, type Hand } from "@/components/actions-row";
+import { ActionsRow, type GeneralAction, type Hand } from "@/components/actions-row";
 import { useDurableBarItems } from "@/components/harness-bar";
 import { Button } from "@/components/ui/button";
 import { ChatInput } from "@/components/ui/chat/chat-input";
@@ -12,6 +12,7 @@ import { NOTICE_ACTION } from "@/components/ui/notice";
 import { Collapse } from "@/components/ui/collapse";
 import { abortPane, apiErrorStatus, postProgramSend, runPaneAction, sendToPane, type ControlResult } from "@/lib/api";
 import { describeThrownError } from "@/lib/api-error-message";
+import { takeBeltIntent } from "@/lib/belt-intent";
 import { clearDraft, loadDraft, saveDraft } from "@/lib/drafts";
 import { addPending, dropNotSent, setPendingState } from "@/lib/durable-pending";
 import {
@@ -85,9 +86,8 @@ import { mintRequestId } from "@/lib/worktree-name";
 // Steer and Stop stay on the program's own routes: a steer is not part of the Send Protocol. A program
 // on a crew member keeps the program's own send route (lib/send-path.ts).
 //
-// The belt keeps what is not about a screen: the Display button, the Switch pill and the Changes
-// pill. The Keys, Type and Quick buttons are not drawn, because there is nothing for them to type
-// into.
+// The belt keeps what is not about a screen: the Display button and the program's own section. The
+// Keys, Type, Quick and Zoom buttons are not drawn, because there is nothing to type into or zoom.
 
 export interface DurableComposerProps {
   paneId: string;
@@ -346,6 +346,29 @@ export function DurableComposer({
     setStatus(say(reading, "action"), reading.note === "sent" ? "success" : "error");
   }
 
+  // Collie's own pills on this belt. A large screen's belt tap in another column leaves its act for this
+  // pane, and this composer runs it once it mounts for the pane, through the pill's own handler (ADR 0120,
+  // lib/belt-intent.ts). A pill this belt does not draw, or draws disabled, does nothing.
+  const general: GeneralAction[] = [
+    {
+      id: "display",
+      icon: Settings2,
+      label: t("composer.controls.displayAria"),
+      word: t("composer.controls.display"),
+      on: display.open,
+      expanded: display.open,
+      onSelect: display.onToggle,
+    },
+  ];
+  const beltPills = useRef<readonly GeneralAction[]>(general);
+  beltPills.current = general;
+  useEffect(() => {
+    const intent = takeBeltIntent(paneScopeKey(scope, paneId));
+    if (intent?.kind !== "action") return;
+    const pill = beltPills.current.find((action) => action.id === intent.id);
+    if (pill !== undefined && pill.disabled !== true) pill.onSelect();
+  }, [scope, paneId]);
+
   return (
     <div
       data-slot="durable-composer"
@@ -356,17 +379,7 @@ export function DurableComposer({
     >
       {aboveBelt}
       <ActionsRow
-        general={[
-          {
-            id: "display",
-            icon: Settings2,
-            label: t("composer.controls.displayAria"),
-            word: t("composer.controls.display"),
-            on: display.open,
-            expanded: display.open,
-            onSelect: display.onToggle,
-          },
-        ]}
+        general={general}
         agent={undefined}
         mine={[]}
         durable={{

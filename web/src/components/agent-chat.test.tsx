@@ -35,7 +35,7 @@ import { HarnessPrefsControl } from "@/components/harness-prefs-control";
 import { __resetHarnessPrefs, setHarnessStatusLineShown } from "@/lib/harness-prefs";
 import { noPromptsConfirmed, rememberNoPromptsConfirm } from "@/lib/no-prompts";
 import { setStripsCollapsed, __resetStripsCollapsed } from "@/lib/strips-collapsed";
-import { __resetOperatorCommands } from "@/lib/operator-config";
+import { __resetOperatorCommands, loadOperatorCommands } from "@/lib/operator-config";
 import { paneMirrorOverride, setPaneMirrorOverride } from "@/lib/mirror-invert";
 import { submitPromptOption } from "@/lib/prompt-action";
 import { submitWizardKeys } from "@/lib/wizard-action";
@@ -5008,6 +5008,24 @@ describe("AgentChat — the focused column of a large screen's strip (ADR 0120)"
     await waitFor(() => expect(within(container).getByRole("button", { name: "Keys" })).toHaveAttribute("aria-expanded", "true"));
     // Taken: a remount of the same pane does not open the dock again.
     expect(takeBeltIntent(paneScopeKey(undefined, agent.paneId))).toBeNull();
+  });
+
+  it("a pane with no screen in a named session runs a Display tap left in another column through its own composer", async () => {
+    server.use(
+      http.get("/api/config", () =>
+        HttpResponse.json({ push: false, vapidPublicKey: "", mux: { name: "reference", capabilities: { paneGrid: false }, unsupportedKeys: [], notes: {} } }),
+      ),
+    );
+    await loadOperatorCommands();
+    // A durable program's panes live in its own named session, so the act is left under that scope.
+    const agent = fixtureAgents[0]!;
+    const scope = { session: "pi" };
+    queueBeltIntent(paneScopeKey(scope, agent.paneId), { kind: "action", id: "display" });
+    const { container } = renderChat({ inStrip: true, scope });
+    await waitFor(() => expect(container.querySelector('[data-slot="durable-composer"]')).not.toBeNull());
+    const belt = container.querySelector<HTMLElement>('[data-slot="durable-composer"]')!;
+    await waitFor(() => expect(within(belt).getByRole("button", { name: "Display settings" })).toHaveAttribute("aria-expanded", "true"));
+    expect(takeBeltIntent(paneScopeKey(scope, agent.paneId))).toBeNull();
   });
 
   it("leaves the tab row and the pane row to the space header and the sidebar, and the space name to the space header", () => {

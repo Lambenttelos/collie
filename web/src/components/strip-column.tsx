@@ -186,27 +186,31 @@ export function PaneColumnBody({
   const subagents = pane.subagents ?? [];
 
   const pill = (id: string): (() => void) => () => onIntent({ kind: "action", id });
-  const general: GeneralAction[] = [
-    { id: "keys", icon: Keyboard, label: t("composer.controls.keys"), onSelect: pill("keys") },
-    ...(gridless
-      ? []
-      : [{ id: "screen", icon: Monitor, label: t("composer.controls.screenAria"), word: t("composer.controls.screen"), onSelect: pill("screen") }]),
-    { id: "type", icon: Terminal, label: t("composer.controls.typeAria"), word: t("composer.controls.type"), onSelect: pill("type") },
-    { id: "quick", icon: Zap, label: t("composer.controls.quick"), onSelect: pill("quick") },
-    ...(isShell ? [{ id: "sent", icon: ListEnd, label: t("sent.button"), onSelect: pill("sent") }] : []),
-    ...(commands.length > 0 ? [{ id: "agent", icon: Slash, label: t("composer.controls.agent"), onSelect: pill("agent") }] : []),
-    ...(todos.length > 0
-      ? [
-          {
-            id: "todos",
-            icon: ListTodo,
-            label: t("composer.controls.tasks", { done: todos.filter((item) => item.status === "completed").length, total: todos.length }),
-            onSelect: pill("todos"),
-          },
-        ]
-      : []),
-    { id: "display", icon: Settings2, label: t("composer.controls.displayAria"), word: t("composer.controls.display"), onSelect: pill("display") },
-  ];
+  const display: GeneralAction = { id: "display", icon: Settings2, label: t("composer.controls.displayAria"), word: t("composer.controls.display"), onSelect: pill("display") };
+  // A pane with no screen draws only the pills its composer (durable-composer.tsx, ADR 0101) can take
+  // from here: Display. Nothing for a terminal, a harness or a folder on this machine. The program's own
+  // section (Steer, Stop, its buttons) is not drawn in a column, so neither is the terminal's Stop.
+  const general: GeneralAction[] = gridless
+    ? [display]
+    : [
+        { id: "keys", icon: Keyboard, label: t("composer.controls.keys"), onSelect: pill("keys") },
+        { id: "screen", icon: Monitor, label: t("composer.controls.screenAria"), word: t("composer.controls.screen"), onSelect: pill("screen") },
+        { id: "type", icon: Terminal, label: t("composer.controls.typeAria"), word: t("composer.controls.type"), onSelect: pill("type") },
+        { id: "quick", icon: Zap, label: t("composer.controls.quick"), onSelect: pill("quick") },
+        ...(isShell ? [{ id: "sent", icon: ListEnd, label: t("sent.button"), onSelect: pill("sent") }] : []),
+        ...(commands.length > 0 ? [{ id: "agent", icon: Slash, label: t("composer.controls.agent"), onSelect: pill("agent") }] : []),
+        ...(todos.length > 0
+          ? [
+              {
+                id: "todos",
+                icon: ListTodo,
+                label: t("composer.controls.tasks", { done: todos.filter((item) => item.status === "completed").length, total: todos.length }),
+                onSelect: pill("todos"),
+              },
+            ]
+          : []),
+        display,
+      ];
 
   return (
     <>
@@ -239,14 +243,14 @@ export function PaneColumnBody({
       <div data-slot="chrome-block" className="relative shrink-0 border-t border-rule bg-chrome px-3">
         <ActionsRow
           general={general}
-          agent={pane.agent}
-          mine={operatorCommands}
+          agent={gridless ? undefined : pane.agent}
+          mine={gridless ? [] : operatorCommands}
           onRun={(text) => {
             onIntent({ kind: "run", text });
             return Promise.resolve(false);
           }}
           stop={
-            stopFor(pane)
+            !gridless && stopFor(pane)
               ? {
                   onStop: () => {
                     onIntent({ kind: "stop" });
@@ -258,9 +262,9 @@ export function PaneColumnBody({
               : undefined
           }
           hand={handOf(prefs)}
-          changes={pane.cwd ? { onClick: () => onIntent({ kind: "changes" }), label: t("chat.changes.label") } : undefined}
+          changes={!gridless && pane.cwd ? { onClick: () => onIntent({ kind: "changes" }), label: t("chat.changes.label") } : undefined}
           agents={
-            subagents.length > 0
+            !gridless && subagents.length > 0
               ? {
                   count: subagents.length,
                   label: t("composer.controls.agents", { count: subagents.length }),
