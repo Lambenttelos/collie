@@ -568,6 +568,48 @@ describe("the stub", () => {
       await stub.close();
     }
 
+    /** A Stop: the harness reads the first event of the answer and hangs up; the stub reads on to the end. */
+    async function hangUpAfterFirstEvent(stub: Stub, prompt: string): Promise<void> {
+      const hangUp = new AbortController();
+      const res = await fetch(`http://127.0.0.1:${String(stub.port)}/pi-lead/api/v1/messages`, { method: "POST", headers: { authorization: `Bearer ${FAKE_KEY}`, "content-type": "application/json" }, body: piBody(prompt), signal: hangUp.signal });
+      await res.body?.getReader().read();
+      hangUp.abort();
+    }
+
+    /** Wait until `n` of pi's live calls have ended in the stub (the stub counts a call once its stream ends). */
+    async function callsEnded(stub: Stub, n: number): Promise<void> {
+      for (let i = 0; i < 500 && stub.stats().harnesses.pi?.recorded !== n; i++) await new Promise((done) => setTimeout(done, 10));
+      expect(stub.stats().harnesses.pi?.recorded).toBe(n);
+    }
+
+    /** A fake OpenRouter whose first answer sends one event and ends only on `release()`; later answers end at once. */
+    async function heldOpenRouter(): Promise<Fake & { release: () => void }> {
+      let release!: () => void;
+      const held = new Promise<void>((done) => {
+        release = done;
+      });
+      const hits: Fake["hits"] = [];
+      const server = createServer((req: IncomingMessage, res) => {
+        req.resume();
+        req.on("end", () => {
+          hits.push({ path: req.url ?? "", auth: req.headers.authorization });
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write(`event: content_block_delta\ndata: ${delta("reply")}\n\n`);
+          const end = () => res.end("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n");
+          if (hits.length === 1) void held.then(end);
+          else end();
+        });
+      });
+      await new Promise<void>((done) => server.listen(0, "127.0.0.1", () => done()));
+      cleanups.push(() => {
+        release();
+        return new Promise<void>((done) => server.close(() => done()));
+      });
+      // SAFETY: a TCP listener's address() is an AddressInfo once `listen` has called back.
+      const { port } = server.address() as AddressInfo;
+      return { server, origin: `http://127.0.0.1:${String(port)}`, hits, release };
+    }
+
     it("removes the file and the meta entries of a case that passes with no model call", async () => {
       const { root, fake } = await setup();
       await recordRun(root, fake, { "pi.a": { prompt: "first a", verdict: "fail" }, "pi.b": { prompt: "first b", verdict: "pass" } });
@@ -615,6 +657,91 @@ describe("the stub", () => {
       expect(treeOf(root)).toEqual(before);
       expect(logged.filter((l) => l.includes("kept"))).toEqual(["pi pi.a: failed live (fail), the earlier recording was not marked failed, kept"]);
       expect(logged.some((l) => l.includes("recorded in a case that did not pass"))).toBe(false);
+    });
+
+    it("keeps the good recording when a call the harness hung up on still streams after the failed verdict", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const before = treeOf(root);
+      await new Promise((done) => setTimeout(done, 5));
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      // The case fails before the answer ends, so the good recording comes back.
+      expect((await post(stub, "pi.a", "fail")).status).toBe(204);
+      expect(treeOf(root)).toEqual(before);
+      // The answer ends after the verdict, and the good recording stays.
+      held.release();
+      await callsEnded(stub, 1);
+      expect(treeOf(root)).toEqual(before);
+    });
+
+    it("keeps the good recording when the harness makes a new call after the failed verdict, before the next case", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const before = treeOf(root);
+      await new Promise((done) => setTimeout(done, 5));
+      const stub = await stubOn(root, fake, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await ask(stub, piBody("flaky a"));
+      expect((await post(stub, "pi.a", "fail")).status).toBe(204);
+      expect(treeOf(root)).toEqual(before);
+      // The agent's turn runs on: its next call comes before the leg names the next case, and is passed on.
+      expect((await ask(stub, piBody("after verdict a"))).status).toBe(200);
+      expect(treeOf(root)).toEqual(before);
+      // Once the leg names the case again (leg.ts stubCase), its calls are recorded again.
+      expect((await fetch(`http://127.0.0.1:${String(stub.port)}/_rig/case`, { method: "POST", body: JSON.stringify({ case: "pi.a" }) })).status).toBe(204);
+      await ask(stub, piBody("retry a"));
+      expect(treeOf(root)["pi.a.jsonl"]).toContain("retry a");
+    });
+
+    it("still writes and marks a call made after the failed verdict of a case with no good recording", async () => {
+      const { root, fake } = await setup();
+      const stub = await stubOn(root, fake, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await ask(stub, piBody("bad a"));
+      await post(stub, "pi.a", "fail");
+      await ask(stub, piBody("after verdict a"));
+      expect(treeOf(root)["pi.a.jsonl"]).toContain("after verdict a");
+      expect(legOf(root)).toMatchObject({ cases: ["pi.a"], failed: ["pi.a"] });
+    });
+
+    it("writes a call the harness hung up on that ends after a passing verdict, as aborted and not marked failed", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      expect((await post(stub, "pi.a", "pass")).status).toBe(204);
+      held.release();
+      await callsEnded(stub, 1);
+      const cassette = treeOf(root)["pi.a.jsonl"];
+      expect(cassette).toContain("stopped a");
+      expect(cassette).toContain('"clientAborted":true');
+      expect(legOf(root).cases).toEqual(["pi.a"]);
+      expect(legOf(root).failed).toBeUndefined();
+    });
+
+    it("keeps a retry's recording when the failed attempt's call ends after it, in the same run", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      await new Promise((done) => setTimeout(done, 5));
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      await post(stub, "pi.a", "fail");
+      // The retry runs the case again and passes while the first attempt's answer still streams.
+      stub.setCase("pi.a");
+      await ask(stub, piBody("retry a"));
+      await post(stub, "pi.a", "pass");
+      const retried = treeOf(root);
+      expect(retried["pi.a.jsonl"]).toContain("retry a");
+      held.release();
+      await callsEnded(stub, 2);
+      expect(treeOf(root)).toEqual(retried);
     });
 
     it("writes and marks the new recording when the case fails and there is none, or the old one is already marked", async () => {

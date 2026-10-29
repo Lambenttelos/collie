@@ -80,7 +80,7 @@ export interface HarnessCounts {
   replayed: number;
   /** Requests passed on to OpenRouter. */
   proxied: number;
-  /** Entries written into the cassettes. */
+  /** Live calls recorded to the end of their stream, including a call of a dropped recording that wrote nothing (settleRecording). */
   recorded: number;
   mismatches: number;
 }
@@ -223,6 +223,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
   const recordedCases = new Map<StubHarness, Set<string>>();
   /** Cases recorded in this run whose verdict was not `pass`, per harness. */
   const failedCases = new Map<StubHarness, Set<string>>();
+  /** Cases whose new recording was dropped at a failed verdict: their later calls are passed on, not recorded, until the leg names a case again. */
+  const closed = new Set<string>();
 
   const writeMeta = (plan: TierPlan) => {
     if (plan.version === null) return;
@@ -256,7 +258,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
   };
 
   const writeCase = (plan: TierPlan, rec: Recording) => {
-    if (plan.version === null) return;
+    // A call still streaming when settleRecording put the earlier recording back holds a recording it dropped.
+    if (plan.version === null || recordings.get(`${rec.harness}|${rec.caseId}`) !== rec) return;
     const dir = join(config.root, plan.harness, versionDir(plan.version));
     mkdirSync(dir, { recursive: true });
     const entries = rec.slots.filter((slot): slot is Entry => slot !== null);
@@ -305,6 +308,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     recordedCases.get(h)?.delete(caseId);
     failedCases.get(h)?.delete(caseId);
     recordings.delete(key);
+    closed.add(key);
     for (const k of ordinals.keys()) if (k.startsWith(`${h}|`) && k.split("|")[2] === caseId) ordinals.delete(k);
     log(`${h} ${caseId}: failed live (${verdict}), the earlier recording was not marked failed, kept`);
   };
@@ -373,8 +377,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     let rec: Recording | undefined;
     let slot = -1;
     let ordinal = 0;
-    if (plan.record) {
-      const recKey = `${h}|${caseId}`;
+    const recKey = `${h}|${caseId}`;
+    if (plan.record && !closed.has(recKey)) {
       rec = recordings.get(recKey);
       if (rec === undefined) {
         rec = { harness: h, caseId, slots: [], before: snapshot(plan, caseId) };
@@ -450,6 +454,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
         // SAFETY: the leg's own POST (leg.ts stubCase), `{ "case": string | null }`.
         const asked = (JSON.parse(body) as { case: string | null }).case;
         current = asked;
+        closed.clear();
         log(`case ${asked ?? "(none)"}`);
         res.writeHead(204).end();
         return;
@@ -521,6 +526,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     port: bound,
     setCase: (caseId) => {
       current = caseId;
+      closed.clear();
     },
     stats: statsNow,
     close: () =>
