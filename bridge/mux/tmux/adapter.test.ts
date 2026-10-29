@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { TmuxMux } from "./adapter.ts";
-import type { TmuxControlClient, TmuxExec, TmuxRunResult } from "./exec.ts";
+import { SpawnTmuxExec, type TmuxControlClient, type TmuxExec, type TmuxRunResult } from "./exec.ts";
 import { FakeTmux } from "./fixture.ts";
 
 // THE THINGS CONFORMANCE CANNOT ASK FOR, pinned here on the real adapter over the real fake.
@@ -276,6 +279,20 @@ describe("a transport that dies during the call", () => {
     expect(typed.ok).toBe(false);
     if (typed.ok) throw new Error("unreachable");
     expect(typed.reason).toBe("unreachable");
+  });
+
+  test.skipIf(process.platform === "win32")("a listing killed on its budget is a tmux that did not answer, not an empty herd", async () => {
+    // A stand-in that hangs and exits 0 with nothing printed on SIGTERM, as a tmux 3.6 client does. Read
+    // as an answer, that was a herd with no panes: every agent dropped and every label forgotten.
+    const dir = await mkdtemp(join(tmpdir(), "collie-tmux-kill-"));
+    try {
+      const binary = join(dir, "tmux");
+      await writeFile(binary, "#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep 5 >/dev/null 2>&1 &\nwait\n");
+      await chmod(binary, 0o755);
+      await expect(new TmuxMux(new SpawnTmuxExec(binary, [], 300)).snapshot()).rejects.toThrow("was killed");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

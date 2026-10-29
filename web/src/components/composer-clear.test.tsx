@@ -7,7 +7,7 @@ import { useState, type ComponentProps } from "react";
 
 import type { JsonValue } from "@/lib/json";
 import { markLive, resetLiveness } from "@/lib/liveness";
-import { clearStatus } from "@/lib/status";
+import { clearStatus, useStatus } from "@/lib/status";
 import { server } from "@/test/setup";
 import { wayOutCase } from "@/test/way-out-states";
 import type { WayOutState } from "@/lib/way-out";
@@ -32,6 +32,11 @@ const PANE = "w1:p1";
 
 /** The Surface the mounted composer reads; tests move it the way the next poll would. */
 let moveSurface: (next: Surface) => void = () => undefined;
+
+/** The status line, which the header draws in the app: where a failed keys call says so. */
+function StatusText() {
+  return <output aria-label="status">{useStatus()?.text ?? ""}</output>;
+}
 
 function mount(state: WayOutState) {
   const c = wayOutCase(state);
@@ -58,7 +63,17 @@ function mount(state: WayOutState) {
     onSent: () => undefined,
     screen: { on: false, onToggle: () => undefined },
   };
-  const router = createMemoryRouter([{ path: "/", element: <Pane {...props} /> }]);
+  const router = createMemoryRouter([
+    {
+      path: "/",
+      element: (
+        <>
+          <Pane {...props} />
+          <StatusText />
+        </>
+      ),
+    },
+  ]);
   return render(<RouterProvider router={router} />);
 }
 
@@ -167,18 +182,28 @@ describe("the Keys board's Clear button", () => {
   });
 });
 
-/** The keys route's posts, by body. */
-function serveKeys(ok = true) {
+/** The keys route's posts, by body. It answers `answer`, after `hold` settles when one is given. */
+function serveKeys(answer: JsonValue = { ok: true }, hold?: Promise<void>) {
   const posted: JsonValue[] = [];
   server.use(
     http.post(/\/api\/pane\/[^/]+\/keys$/, async ({ request }) => {
       // SAFETY: the phone's own JSON.stringify body is JSON, a JsonValue.
       posted.push((await request.json()) as JsonValue);
-      return HttpResponse.json(ok ? { ok: true } : { ok: false, error: "refused", code: "keys.send_failed" });
+      if (hold !== undefined) await hold;
+      return HttpResponse.json(answer);
     }),
   );
   return posted;
 }
+
+/** The keys route's answer when nothing was typed: a key the multiplexer refused, a gone pane, a failed dial. */
+const NOTHING_TYPED = { ok: false, error: "refused", code: "keys.send_failed", detail: { reason: "refused" }, outcome: "refused" };
+/** Its answer when the keys may have gone in: Herdr took them and answered after the bridge's budget. */
+const TIMED_OUT = "herdr pane.send_keys: timed out after 5000ms";
+const MAY_HAVE_TYPED = { ok: false, error: TIMED_OUT, code: "keys.send_failed", detail: { reason: TIMED_OUT }, outcome: "unknown" };
+/** The same failure from a bridge that predates `outcome`: it says nothing about what was typed. */
+const CLOSED = "herdr pane.send_keys: connection closed before reply";
+const OLDER_BRIDGE = { ok: false, error: CLOSED, code: "keys.send_failed", detail: { reason: CLOSED } };
 
 const DRAFT = "a long thought\nwith a break";
 const FREE = wayOutCase("free").surface;
@@ -262,12 +287,58 @@ describe("Restore after a Clear", () => {
     }
   });
 
-  it("a refusal from the keys route gives the offer back, since nothing was typed", async () => {
+  it("a refusal from the keys route that says nothing was typed gives the offer back", async () => {
     const user = userEvent.setup();
-    serveKeys(false);
+    serveKeys(NOTHING_TYPED);
     await clearIt(user);
     act(() => moveSurface({ ...FREE, revision: 3 }));
     await user.click(await screen.findByRole("button", { name: "Type the cleared text back into the box" }));
     expect(await screen.findByRole("button", { name: "Type the cleared text back into the box" })).toBeEnabled();
+  });
+
+  it("a failure that may have typed the text does not give the offer back: one Clear, at most one Restore", async () => {
+    // A timeout after Herdr took the keys, and an older bridge's failure that says nothing either way. The
+    // keys can land after the answer, with the box still empty, so a second offer would type the text twice.
+    for (const [answer, reason] of [
+      [MAY_HAVE_TYPED, TIMED_OUT],
+      [OLDER_BRIDGE, CLOSED],
+    ] as const) {
+      clearStatus();
+      const user = userEvent.setup();
+      const keys = serveKeys(answer);
+      await clearIt(user);
+      act(() => moveSurface({ ...FREE, revision: 3 }));
+      await user.click(await screen.findByRole("button", { name: "Type the cleared text back into the box" }));
+      await waitFor(() => expect(screen.getByRole("status", { name: "status" })).toHaveTextContent(reason));
+      expect(restore()).toBeNull();
+      act(() => moveSurface({ ...FREE, revision: 4 }));
+      expect(restore()).toBeNull();
+      expect(keys).toHaveLength(1);
+      cleanup();
+    }
+  });
+
+  it("a read that shows a draft while Restore is out ends the offer, whatever the answer says", async () => {
+    // The draft still shows when the answer lands, or it came and went before it (sent or deleted).
+    for (const reads of [[DRAFTED], [DRAFTED, FREE]]) {
+      clearStatus();
+      const user = userEvent.setup();
+      let release: () => void = () => undefined;
+      const hold = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const keys = serveKeys(NOTHING_TYPED, hold);
+      await clearIt(user);
+      act(() => moveSurface({ ...FREE, revision: 3 }));
+      await user.click(await screen.findByRole("button", { name: "Type the cleared text back into the box" }));
+      await waitFor(() => expect(keys).toHaveLength(1));
+      reads.forEach((read, i) => act(() => moveSurface({ ...read, revision: 4 + i })));
+      release();
+      await waitFor(() => expect(screen.getByRole("status", { name: "status" })).toHaveTextContent("Those keys couldn't be sent"));
+      act(() => moveSurface({ ...FREE, revision: 9 }));
+      expect(restore()).toBeNull();
+      expect(keys).toHaveLength(1);
+      cleanup();
+    }
   });
 });

@@ -90,7 +90,8 @@ import {
   PAIR_WINDOW_MS,
 } from "./pair-limit.ts";
 import { readFileSync } from "node:fs";
-import { mkdir, mkdtemp, realpath, rm, truncate, utimes, writeFile } from "node:fs/promises";
+import { createServer, type Socket } from "node:net";
+import { chmod, mkdir, mkdtemp, realpath, rm, truncate, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -109,8 +110,14 @@ import { withAgentBeacons } from "./beacon/decorate.ts";
 import { fakeBeaconReader } from "./beacon/fake.ts";
 import { withAgentHints } from "./beacon/hint.ts";
 import { HerdrMux, herdrMuxFactory } from "./mux/herdr/adapter.ts";
-import { tmuxMuxFactory } from "./mux/tmux/adapter.ts";
-import type { HerdrClient, PaneRead } from "./mux/herdr/client.ts";
+import { TmuxMux, tmuxMuxFactory } from "./mux/tmux/adapter.ts";
+import { SpawnTmuxExec } from "./mux/tmux/exec.ts";
+import { ZellijMux } from "./mux/zellij/adapter.ts";
+import { TIMED_OUT_CODE as ZELLIJ_TIMED_OUT_CODE, timedOutMessage as zellijTimedOut, type ZellijExec } from "./mux/zellij/exec.ts";
+import { FakeZellij } from "./mux/zellij/fixture.ts";
+import { ZellijSessionBinding } from "./mux/zellij/session.ts";
+import { HerdrClient, type PaneRead } from "./mux/herdr/client.ts";
+import { toPipeName } from "./dial.ts";
 import {
   muxAck,
   muxGone,
@@ -617,6 +624,45 @@ function asMux(fake: Partial<HerdrClient>): MuxAdapter {
   return new HerdrMux(fake as HerdrClient, () => []);
 }
 
+/**
+ * A Herdr stand-in on a real Unix socket (a named pipe on Windows), the way mux/herdr/client.test.ts
+ * builds one: it records each request's method and hands the connection to `answer`, which may answer
+ * late, answer an error, or close with no answer.
+ */
+async function herdrStandIn(answer: (conn: Socket, id: string) => void) {
+  const dir = await mkdtemp(join(tmpdir(), "collie-keys-"));
+  const path = process.platform === "win32" ? `collie-keys-${process.pid}-${Date.now()}` : join(dir, "herdr.sock");
+  const methods: string[] = [];
+  const server = createServer((conn) => {
+    let buf = "";
+    conn.on("error", () => {
+      // The client gave up and closed first; nothing to answer.
+    });
+    conn.on("data", (chunk) => {
+      buf += chunk.toString();
+      const nl = buf.indexOf("\n");
+      if (nl < 0) return;
+      // SAFETY: the client under test writes exactly one JSON request line per connection.
+      const asked = JSON.parse(buf.slice(0, nl)) as { id: string; method: string };
+      buf = "";
+      methods.push(asked.method);
+      answer(conn, asked.id);
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(process.platform === "win32" ? toPipeName(path) : path, resolve);
+  });
+  return {
+    path,
+    methods,
+    close: async () => {
+      server.close();
+      await rm(dir, { recursive: true, force: true });
+    },
+  };
+}
+
 describe("pane write prompt binding", () => {
   type ReadArgs = Parameters<HerdrClient["readPane"]>;
 
@@ -961,7 +1007,92 @@ describe("pane write prompt binding", () => {
       error: "no such pane",
       code: "keys.send_failed",
       detail: { reason: "no such pane" },
+      // An exception the adapter cannot place may have come after the keys went out.
+      outcome: "unknown",
     });
+  });
+
+  /** The keys route over the real Herdr client and adapter, at `path`, on a 40 ms budget. */
+  async function keysThroughHerdr(path: string, keys: string[]) {
+    const { audit } = auditEntries();
+    const res = await keysPane(new HerdrMux(new HerdrClient(path, 40), () => []), cfg(), "w1:p1", request({ keys }), audit, null, "default");
+    expect(res.status).toBe(200);
+    return res.json();
+  }
+
+  test("a key batch Herdr took but did not answer in time may have typed: `outcome: \"unknown\"`", async () => {
+    // Restore (ADR 0116) types a cleared draft through this route and gives its offer back only on a
+    // refusal that says nothing was typed, so a failure after the write must not read like one. The
+    // client's own 40 ms budget is what runs out: the stand-in reads the keys and never answers.
+    const silent = await herdrStandIn(() => undefined);
+    const dropped = await herdrStandIn((conn) => conn.destroy());
+    try {
+      expect(await keysThroughHerdr(silent.path, ["a"])).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "unknown" });
+      expect(silent.methods).toEqual(["pane.send_keys"]);
+      expect(await keysThroughHerdr(dropped.path, ["a"])).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "unknown" });
+      expect(dropped.methods).toEqual(["pane.send_keys"]);
+    } finally {
+      await silent.close();
+      await dropped.close();
+    }
+  });
+
+  test("a key batch that typed nothing says so: `outcome: \"refused\"` for a gone pane, a refused key and no Herdr at all", async () => {
+    const gone = await herdrStandIn((conn, id) => {
+      conn.end(`${JSON.stringify({ id, error: { code: "pane_not_found", message: "no pane w1:p1" } })}\n`);
+    });
+    const quiet = await herdrStandIn(() => undefined);
+    try {
+      expect(await keysThroughHerdr(gone.path, ["a"])).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "refused" });
+      // A key Herdr has no way to send is refused before anything is written.
+      expect(await keysThroughHerdr(quiet.path, ["PageUp"])).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "refused" });
+      expect(quiet.methods).toEqual([]);
+    } finally {
+      await gone.close();
+      await quiet.close();
+    }
+    // Nothing listens at the path: the dial failed, so no request left the bridge.
+    const nowhere = process.platform === "win32" ? `collie-keys-nowhere-${process.pid}` : join(tmpdir(), `collie-keys-nowhere-${process.pid}.sock`);
+    expect(await keysThroughHerdr(nowhere, ["a"])).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "refused" });
+  });
+
+  test.skipIf(process.platform === "win32")("a tmux send-keys the bridge killed on its budget may have typed: `outcome: \"unknown\"`", async () => {
+    // Two stand-ins for a tmux that never answers. One dies of the SIGTERM (exit 143); the other exits 0
+    // with nothing printed, as a tmux 3.6 client does when it is sent SIGTERM.
+    const dir = await mkdtemp(join(tmpdir(), "collie-keys-tmux-"));
+    try {
+      const scripts = {
+        dies: "#!/bin/sh\nexec sleep 5\n",
+        exitsClean: "#!/bin/sh\ntrap 'kill $! 2>/dev/null; exit 0' TERM\nsleep 5 >/dev/null 2>&1 &\nwait\n",
+      };
+      for (const [name, script] of Object.entries(scripts)) {
+        const binary = join(dir, name);
+        await writeFile(binary, script);
+        await chmod(binary, 0o755);
+        const { audit } = auditEntries();
+        const res = await keysPane(new TmuxMux(new SpawnTmuxExec(binary, [], 300)), cfg(), "%1", request({ keys: ["a"] }), audit, null, "default");
+        expect(await res.json()).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "unknown" });
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a zellij send-keys the bridge killed on its budget may have typed: `outcome: \"unknown\"`", async () => {
+    // The answer SpawnZellijExec gives for a run it killed, served for `send-keys` alone over the fixture.
+    const fake = new FakeZellij();
+    const exec: ZellijExec = {
+      run: (args) =>
+        args.includes("send-keys")
+          ? Promise.resolve({ code: ZELLIJ_TIMED_OUT_CODE, stdout: "", stderr: zellijTimedOut(args, 5000) })
+          : fake.run(args),
+      stream: (args, handlers) => fake.stream(args, handlers),
+    };
+    const zellij = new ZellijMux(new ZellijSessionBinding(exec, ""));
+    const paneId = (await zellij.snapshot()).panes[0]?.paneId ?? "";
+    const { audit } = auditEntries();
+    const res = await keysPane(zellij, cfg(), paneId, request({ keys: ["a"] }), audit, null, "default");
+    expect(await res.json()).toMatchObject({ ok: false, code: "keys.send_failed", outcome: "unknown" });
   });
 
   test("rejects oversized and non-string expected_prompt before a keys write", async () => {

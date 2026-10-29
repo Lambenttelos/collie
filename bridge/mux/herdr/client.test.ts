@@ -6,7 +6,7 @@ import { join } from "node:path";
 
 import { toPipeName } from "../../dial.ts";
 import type { JsonObject } from "../../json.ts";
-import { HerdrClient, WORKTREE_TIMEOUT_MS } from "./client.ts";
+import { HerdrClient, HerdrNotSent, WORKTREE_TIMEOUT_MS } from "./client.ts";
 
 // The per-call budget (ADR 0089). Every Herdr call gets the client's own budget, 5 s in production,
 // except the two worktree calls, which run `git worktree add` before they answer and get
@@ -117,6 +117,30 @@ describe("HerdrClient per-call timeout", () => {
     await client.createWorktree({ cwd: "/repo", branch: "worktree/x" });
     expect(lastRequest?.params).toEqual({ cwd: "/repo", branch: "worktree/x", focus: false });
     expect(Object.keys(lastRequest?.params ?? {})).not.toContain("base");
+  });
+});
+
+// What reached Herdr (ADR 0116, Restore). A request that failed before its line was written is a
+// `HerdrNotSent`: nothing was sent, so a refusal can say so. One that went out and got no answer in
+// time is a plain error, because Herdr may have acted on it.
+describe("HerdrClient: a request that never left", () => {
+  const nowhere = () => (process.platform === "win32" ? `collie-herdr-nowhere-${process.pid}` : join(tmpdir(), `collie-herdr-nowhere-${process.pid}.sock`));
+
+  test("a dial that fails, through either dialer, is HerdrNotSent with the dialer's own words", async () => {
+    // `bun` rejects the dial; `net` reports it through the socket's error event first.
+    for (const mode of ["bun", "net"] as const) {
+      const failed = new HerdrClient(nowhere(), 1_000, mode).sendPaneKeys("w1:p1", ["a"]);
+      await expect(failed).rejects.toBeInstanceOf(HerdrNotSent);
+      await expect(failed).rejects.toThrow(/./u);
+    }
+  });
+
+  test("a request Herdr read but did not answer in time is not HerdrNotSent", async () => {
+    const client = new HerdrClient(await lateHerdr({}), CLIENT_BUDGET_MS);
+    const late = client.sendPaneKeys("w1:p1", ["a"]);
+    await expect(late).rejects.toThrow(`herdr pane.send_keys: timed out after ${CLIENT_BUDGET_MS}ms`);
+    await expect(late).rejects.not.toBeInstanceOf(HerdrNotSent);
+    expect(lastRequest?.method).toBe("pane.send_keys");
   });
 });
 

@@ -298,6 +298,18 @@ export interface HerdrWorktreeCreate {
   path?: string;
 }
 
+/**
+ * A request that failed before its line was written (the dial failed, the connection closed or
+ * errored first, or the budget ran out while connecting): Herdr never saw it, so nothing it does
+ * happened. Any other failure may have reached Herdr. The message is the cause's own.
+ */
+export class HerdrNotSent extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause));
+    this.name = "HerdrNotSent";
+  }
+}
+
 export class HerdrClient {
   constructor(
     private readonly socketPath: string,
@@ -307,15 +319,20 @@ export class HerdrClient {
   ) {}
 
   /**
-   * One request, one reply, one connection. Rejects on error reply, timeout, or early close.
+   * One request, one reply, one connection. Rejects on error reply, timeout, or early close; a
+   * rejection before the request line is written is a {@link HerdrNotSent}.
    *
    * `timeoutMs` overrides the client's budget for this one call; absent, the constructor's applies.
    */
   private request<T>(method: string, params: JsonObject = {}, timeoutMs = this.timeoutMs): Promise<T> {
     const id = `b${++idCounter}`;
-    return new Promise<T>((resolve, reject) => {
+    return new Promise<T>((resolve, rejectRequest) => {
       let buf = "";
       let settled = false;
+      let written = false;
+      // Every rejection below passes here: before the request line is written nothing reached
+      // Herdr, so it is a HerdrNotSent; after it, Herdr may have acted.
+      const reject = (cause: unknown) => rejectRequest(written ? cause : new HerdrNotSent(cause));
       // The live socket, once the dial opens one. Hoisted so EVERY terminal path (timeout
       // included) can close it — otherwise a timeout leaves the FD dangling.
       let socket: SockHandle | null = null;
@@ -404,6 +421,7 @@ export class HerdrClient {
           // one go; the dialer owns that continuation, so there is nothing to retry here (dial.ts,
           // write-drain.ts). A connection that dies mid-write lands in close/error above and
           // rejects like any other transport failure.
+          written = true;
           s.write(JSON.stringify({ id, method, params }) + "\n");
           s.flush();
         } catch (err) {

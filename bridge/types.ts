@@ -1574,6 +1574,12 @@ export type ActionResponse =
       /** On a 409 `prompt_changed` only: which check refused (`not_found`, `not_in_tail`, `empty`,
        *  `style_empty`, `style_not_found`, `style_misaligned`). A reason code, never pane content. */
       reason?: string;
+      /** On a `keys.send_failed` only: `refused` when the multiplexer answered no (a key it cannot send,
+       *  a gone pane, a missing capability) or provably never got the call (`attempted: false`), so no
+       *  key was typed; `unknown` for any other `unreachable`, where the keys may have gone in (a
+       *  timeout, a call killed on its budget, a socket closed after the write). Absent from an older
+       *  bridge, which a client reads as `unknown`. */
+      outcome?: "refused" | "unknown";
     };
 
 /** POST /api/pane/:id/upload — image saved to a host file; `path` is the absolute path to ref. */

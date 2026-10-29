@@ -812,8 +812,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   // through the keys route (`POST /api/pane/:id/keys`, the key gate's `person_tap`, the way Type mode types),
   // with no Enter: a line break or a tab in the text becomes a space (`boundedDraft`), so no key in it
   // submits. The keys route audits a typed character only as a mask, never the text. One Restore per Clear:
-  // the offer goes as the tap leaves, so a second tap cannot type the text twice; a refusal that says
-  // nothing was typed gives it back.
+  // the offer goes as the tap leaves, so a second tap cannot type the text twice; only a refusal that says
+  // nothing was typed (`outcome: "refused"`) gives it back. A timeout after the write, or an older bridge's
+  // failure that says nothing either way, may have typed it, and the keys can land after the answer.
   const [restoring, setRestoring] = useState(false);
   async function restoreDraft(): Promise<void> {
     const note = clearNote;
@@ -827,7 +828,7 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
         setClearNote(null);
         onSent();
       } else {
-        setClearNote((now) => (now === null ? now : { ...now, draft: note.draft }));
+        if (res.outcome === "refused") setClearNote((now) => (now === null ? now : { ...now, draft: note.draft }));
         setStatus(describeApiError(res), "error");
       }
     } catch (e) {
@@ -838,7 +839,8 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
   }
   // The Clear notice's lifetime. It goes after CLEAR_NOTE_MS, and on another pane. Restore ends, with the
   // notice, once a read after the Clear shows a draft in the box again: the person typed there, or Restore
-  // did, so the text the Clear took is no longer what the box lacks.
+  // did, so the text the Clear took is no longer what the box lacks. A draft read while Restore is out ends
+  // it too, so a refusal answered after it gives nothing back.
   useEffect(() => {
     if (clearNote === null) return;
     const left = clearNote.at + CLEAR_NOTE_MS - Date.now();
@@ -853,9 +855,9 @@ export const Composer = forwardRef<ComposerHandle, ComposerProps>(function Compo
     setClearNote((note) => {
       if (note === null) return note;
       if (boxComposer !== "draft") return note.seenEmpty ? note : { ...note, seenEmpty: true };
-      return note.seenEmpty && note.draft !== null ? null : note;
+      return note.seenEmpty && (note.draft !== null || restoring) ? null : note;
     });
-  }, [boxComposer, clearNote?.at]);
+  }, [boxComposer, clearNote?.at, restoring]);
   // The reason a destructive line is held for a second tap, said at the Send slot (it was a header line,
   // which holds nothing a person must act on, M56 spec 07). Shown only while the confirm is armed.
   const [destructiveNote, setDestructiveNote] = useState<string | null>(null);

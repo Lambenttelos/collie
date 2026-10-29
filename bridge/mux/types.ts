@@ -55,7 +55,10 @@ export { canonicalMuxKey, formatMuxKey, isMuxKey, parseMuxKey } from "./keys.ts"
  *  • `refused` — the multiplexer understood and said no (a key it will not send, a label it will
  *    not take). Retrying the same call gets the same answer.
  *  • `unreachable` — the multiplexer did not answer. This is the only one worth retrying, and it is
- *    what drives the connected/disconnected banner.
+ *    what drives the connected/disconnected banner. `attempted: false` says the call never reached
+ *    the multiplexer (a failed dial, a connection lost before the request went out), so nothing it
+ *    does happened; absent, a write may have landed (a timeout, a call killed on its budget, or a
+ *    closed socket after the request went out).
  *
  * An adapter MUST return this rather than throw for anything it declared absent — that is checked by
  * conformance (M10/03), because a throw is what forces every route to guess.
@@ -64,7 +67,7 @@ export type MuxRefusal =
   | { readonly reason: "unsupported"; readonly capability: MuxCapability; readonly detail: string }
   | { readonly reason: "gone"; readonly detail: string }
   | { readonly reason: "refused"; readonly detail: string }
-  | { readonly reason: "unreachable"; readonly detail: string };
+  | { readonly reason: "unreachable"; readonly detail: string; readonly attempted?: false };
 
 /** A refusal, as a failed outcome. */
 export type MuxRefusalOutcome = { readonly ok: false } & MuxRefusal;
@@ -147,9 +150,12 @@ export function muxRefused(detail: string): MuxRefusalOutcome {
   return { ok: false, reason: "refused", detail };
 }
 
-/** "The multiplexer did not answer." */
-export function muxUnreachable(detail: string): MuxRefusalOutcome {
-  return { ok: false, reason: "unreachable", detail };
+/**
+ * "The multiplexer did not answer." `{ attempted: false }` when the call never reached it; an absent
+ * option carries no `attempted` key at all.
+ */
+export function muxUnreachable(detail: string, options: { readonly attempted?: false } = {}): MuxRefusalOutcome {
+  return options.attempted === false ? { ok: false, reason: "unreachable", detail, attempted: false } : { ok: false, reason: "unreachable", detail };
 }
 
 /**

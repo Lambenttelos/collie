@@ -64,6 +64,7 @@ import {
 import {
   DEFAULT_TIMEOUT_MS,
   HerdrClient,
+  HerdrNotSent,
   paneAgentSession,
   type CreatedShell,
   type HerdrRpc,
@@ -173,10 +174,14 @@ function reason<T>(err: T): string {
  */
 const GONE_CODES: readonly string[] = ["pane_not_found", "tab_not_found", "workspace_not_found"];
 
-/** Which refusal an exception off the socket is: a dead pane/tab, or a multiplexer that did not answer. */
+/**
+ * Which refusal an exception off the socket is: a dead pane/tab, or a multiplexer that did not answer.
+ * A request that never left (`HerdrNotSent`) says so with `attempted: false`: nothing was sent.
+ */
 function transportRefusal<T>(err: T): MuxRefusalOutcome {
   const detail = reason(err);
-  return GONE_CODES.some((code) => detail.includes(code)) ? muxGone(detail) : muxUnreachable(detail);
+  if (GONE_CODES.some((code) => detail.includes(code))) return muxGone(detail);
+  return muxUnreachable(detail, err instanceof HerdrNotSent ? { attempted: false } : {});
 }
 
 /**

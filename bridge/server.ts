@@ -5361,8 +5361,10 @@ export async function keysPane(
       detail: { keys, sent: false, promptBinding: binding.audit },
     });
   }
+  // Nothing was typed unless the multiplexer may have taken the keys and not answered (ADR 0116, Restore).
+  const outcome = sent.reason === "unreachable" && sent.attempted !== false ? "unknown" : "refused";
   return json(
-    { ok: false, ...apiError("keys.send_failed", { reason: sent.detail }) } satisfies ActionResponse,
+    { ok: false, ...apiError("keys.send_failed", { reason: sent.detail }), outcome } satisfies ActionResponse,
     ae,
   );
 }

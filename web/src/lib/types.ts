@@ -1797,6 +1797,9 @@ export type ActionResponse =
       detail?: ApiErrorDetail;
       /** On a 409 `prompt_changed` only: the bridge's reason code for the refusal. */
       reason?: string;
+      /** On a `keys.send_failed` only: `refused` when no key was typed, `unknown` when the keys may have
+       *  gone in. Absent from an older bridge, and read as `unknown`. */
+      outcome?: "refused" | "unknown";
     };
 
 export type UploadResponse =

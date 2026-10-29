@@ -84,6 +84,7 @@ import {
 import {
   resolveTmuxBinary,
   SpawnTmuxExec,
+  TIMED_OUT_CODE,
   tmuxServerArgs,
   tmuxServerLabel,
   type TmuxExec,
@@ -728,10 +729,13 @@ export class TmuxMux implements MuxAdapter {
  *
  * The three sentences were read off the real binary (M10/04): `can't find pane: %999` for something
  * that has gone away, `no server running on …` for a tmux that is not there, and anything else —
- * `duplicate session: other` — is tmux understanding and saying no.
+ * `duplicate session: other` — is tmux understanding and saying no. A run killed on its budget is a
+ * transport that died mid-call (MUX_CONTRACT.md § Transport death): `unreachable`, since a write may
+ * have landed.
  */
 function refusalFor(result: TmuxRunResult): MuxRefusalOutcome {
   const detail = (result.stderr.trim() || result.stdout.trim()) || `tmux exited ${String(result.code)}`;
+  if (result.code === TIMED_OUT_CODE && result.stdout === "") return muxUnreachable(detail);
   if (saysMissing(detail)) return muxGone(detail);
   if (saysNoServer(detail)) return muxUnreachable(detail);
   return muxRefused(detail);

@@ -150,6 +150,18 @@ export function tmuxArgv(binary: string, serverArgs: readonly string[], args: re
 /** The message a run reports when there is no tmux binary to run at all. */
 export const NO_TMUX_BINARY = "no tmux binary found — set COLLIE_TMUX_BIN to its absolute path";
 
+/** The exit code a run killed on its budget reports. 128 + SIGTERM, as zellij's and tern's runners do. */
+export const TIMED_OUT_CODE = 143;
+
+/**
+ * What a run that ran out of budget says. It names the tmux command alone: the arguments after it
+ * are a pane id, typed keys or a `-F` format full of separator bytes, none of them for a log line.
+ */
+export function timedOutMessage(args: readonly string[], timeoutMs: number): string {
+  const verb = args.find((arg) => !arg.startsWith("-")) ?? "the call";
+  return `tmux did not answer \`${verb}\` within ${String(timeoutMs)}ms and was killed`;
+}
+
 /**
  * The real exec: `Bun.spawn` with an argv array, a resolved binary and the server flags prepended.
  *
@@ -173,13 +185,21 @@ export class SpawnTmuxExec implements TmuxExec {
     });
     // A hung tmux (a server mid-restart, a full socket) must not hold a request open forever: the
     // budget is the target's, and a kill turns it into the `unreachable` the banner already knows.
-    const timer = setTimeout(() => child.kill(), this.timeoutMs);
+    // The kill has to say so: a tmux 3.6 client that takes SIGTERM exits 0 with empty pipes (probed),
+    // which read as a command that ran, and a write it may have delivered read as done.
+    let killed = false;
+    const timer = setTimeout(() => {
+      killed = true;
+      child.kill();
+    }, this.timeoutMs);
     try {
       const [stdout, stderr] = await Promise.all([
         new Response(child.stdout).text(),
         new Response(child.stderr).text(),
       ]);
-      return { code: await child.exited, stdout, stderr };
+      const code = await child.exited;
+      if (killed) return { code: TIMED_OUT_CODE, stdout: "", stderr: timedOutMessage(args, this.timeoutMs) };
+      return { code, stdout, stderr };
     } finally {
       clearTimeout(timer);
     }

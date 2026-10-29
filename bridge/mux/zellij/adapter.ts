@@ -92,7 +92,7 @@ import {
   type MuxWorktreeScope,
   type MuxWatchOptions,
 } from "../types.ts";
-import { resolveZellijBinary, SpawnZellijExec } from "./exec.ts";
+import { resolveZellijBinary, SpawnZellijExec, TIMED_OUT_CODE } from "./exec.ts";
 import { EXTENDED_ONLY_CHORDS } from "../keys.ts";
 import { toZellijKey, ZELLIJ_UNSENDABLE_KEYS } from "./keys.ts";
 import { zellijBeaconMatcher } from "./markers.ts";
@@ -621,9 +621,11 @@ export class ZellijMux implements MuxAdapter {
     const call: ZellijCall = await this.session.run(args);
     if (!call.ok) return muxUnreachable(call.detail);
     // A non-zero exit that survived the session check is zellij refusing the arguments themselves —
-    // an unsupported key name is the one the probe found (keys.ts).
+    // an unsupported key name is the one the probe found (keys.ts). A run the runner killed on its
+    // budget is not: a transport that died mid-call is `unreachable` (MUX_CONTRACT.md § Transport death).
     if (call.result.code !== 0) {
-      return muxRefused((call.result.stderr.trim() || call.result.stdout.trim()) || `zellij exited ${String(call.result.code)}`);
+      const detail = (call.result.stderr.trim() || call.result.stdout.trim()) || `zellij exited ${String(call.result.code)}`;
+      return call.result.code === TIMED_OUT_CODE && call.result.stdout === "" ? muxUnreachable(detail) : muxRefused(detail);
     }
     return muxAck();
   }
