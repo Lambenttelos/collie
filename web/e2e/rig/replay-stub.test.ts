@@ -555,6 +555,8 @@ describe("the stub", () => {
     // SAFETY: meta.json is the stub's own JSON.stringify of a CassetteMeta (stub.ts writeMeta).
     const legOf = (root: string) => JSON.parse(readFileSync(join(dirOf(root), "meta.json"), "utf8")).legs.solo as { cases: string[]; failed?: string[]; recordedAt: string };
     const treeOf = (root: string): Record<string, string> => Object.fromEntries(readdirSync(dirOf(root)).map((name) => [name, readFileSync(join(dirOf(root), name), "utf8")]));
+    /** A harness's cassette of a case, one `prompt #ordinal` per entry. */
+    const turnsIn = (root: string, harness: "pi" | "omp", caseId: string): string[] => parseCassette(readFileSync(join(root, harness, harness === "pi" ? "1.3.0" : "18.6.1", `${caseId}.jsonl`), "utf8")).entries.map((e) => `${e.request.prompt} #${String(e.ordinal)}`);
     const logged: string[] = [];
 
     /** A record run of pi: each case asks once (or not at all) and gets its verdict; the stub is closed after. */
@@ -796,6 +798,96 @@ describe("the stub", () => {
       await recordRun(root, fake, { "pi.a": { prompt: "worse a", verdict: "fail" } });
       expect(treeOf(root)["pi.a.jsonl"]).toContain("worse a");
       expect(legOf(root)).toMatchObject({ cases: ["pi.a"], failed: ["pi.a"] });
+    });
+
+    it("starts a new recording each time the leg names a case, so each harness's cassette holds only the last attempt", async () => {
+      const { root, fake } = await setup();
+      const stub = await startStub({ root, leg: "solo", plans: { pi: plan("pi", "live", true), omp: plan("omp", "live", true) }, literals: [...LITERALS], upstream: fake.origin });
+      cleanups.push(() => stub.close());
+      // A Claude case, in which both harnesses make calls.
+      const attempt = async (prompt: string) => {
+        await ask(stub, piBody(prompt));
+        await ask(stub, ompBody(prompt), "/omp-lead/api/v1/responses");
+      };
+      stub.setCase("claude.a");
+      await attempt("first a");
+      await post(stub, "claude.a", "fail");
+      // The retry (`--retries`) names the case again as the leg does, and passes.
+      expect((await fetch(`http://127.0.0.1:${String(stub.port)}/_rig/case`, { method: "POST", body: JSON.stringify({ case: "claude.a" }) })).status).toBe(204);
+      await attempt("second a");
+      await post(stub, "claude.a", "pass");
+      expect(turnsIn(root, "pi", "claude.a")).toEqual(["second a #0"]);
+      expect(turnsIn(root, "omp", "claude.a")).toEqual(["second a #0"]);
+      expect(legOf(root).failed).toBeUndefined();
+      // `--repeat-each` runs it once more.
+      stub.setCase("claude.a");
+      await attempt("third a");
+      await post(stub, "claude.a", "pass");
+      expect(turnsIn(root, "pi", "claude.a")).toEqual(["third a #0"]);
+      expect(turnsIn(root, "omp", "claude.a")).toEqual(["third a #0"]);
+      // An attempt that fails puts the passing one before it back.
+      stub.setCase("claude.a");
+      await attempt("fourth a");
+      await post(stub, "claude.a", "fail");
+      expect(turnsIn(root, "pi", "claude.a")).toEqual(["third a #0"]);
+      expect(legOf(root).failed).toBeUndefined();
+    });
+
+    it("marks a case named again while a call of the earlier attempt still streams, so a failing attempt keeps its own recording", async () => {
+      const { root } = await setup();
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      // The first attempt passes while its Stop answer still streams; its other call is written.
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      await ask(stub, piBody("first a"));
+      await post(stub, "pi.a", "pass");
+      // `--repeat-each` names the case again; the earlier answer then ends and writes nothing.
+      stub.setCase("pi.a");
+      held.release();
+      await callsEnded(stub, 2);
+      expect(legOf(root).failed).toEqual(["pi.a"]);
+      // The new attempt fails and keeps its own recording, still marked.
+      await ask(stub, piBody("retry a"));
+      await post(stub, "pi.a", "fail");
+      expect(turnsIn(root, "pi", "pi.a")).toEqual(["retry a #0"]);
+      expect(legOf(root).failed).toEqual(["pi.a"]);
+    });
+
+    it("keeps a good recording when the case is named again before its earlier attempt wrote anything, and the new attempt fails", async () => {
+      const { root, fake } = await setup();
+      await recordRun(root, fake, { "pi.a": { prompt: "good a", verdict: "pass" } });
+      const good = treeOf(root)["pi.a.jsonl"];
+      const held = await heldOpenRouter();
+      const stub = await stubOn(root, held, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await hangUpAfterFirstEvent(stub, "stopped a");
+      await post(stub, "pi.a", "pass");
+      stub.setCase("pi.a");
+      held.release();
+      await callsEnded(stub, 1);
+      await ask(stub, piBody("retry a"));
+      await post(stub, "pi.a", "fail");
+      expect(treeOf(root)["pi.a.jsonl"]).toBe(good);
+      expect(legOf(root).failed).toBeUndefined();
+    });
+
+    it("removes an earlier attempt's recording when the case runs again and passes with no model call", async () => {
+      const { root, fake } = await setup();
+      const stub = await stubOn(root, fake, plan("pi", "live", true));
+      stub.setCase("pi.a");
+      await ask(stub, piBody("first a"));
+      await post(stub, "pi.a", "fail");
+      stub.setCase("pi.a");
+      await post(stub, "pi.a", "pass");
+      // A later case's write does not list pi.a again.
+      stub.setCase("pi.b");
+      await ask(stub, piBody("first b"));
+      await post(stub, "pi.b", "pass");
+      expect(readdirSync(dirOf(root)).toSorted()).toEqual(["meta.json", "pi.b.jsonl"]);
+      expect(legOf(root).cases).toEqual(["pi.b"]);
+      expect(legOf(root).failed).toBeUndefined();
+      expect(stub.stats().written).toEqual([join(dirOf(root), "pi.b.jsonl")]);
     });
 
     it("changes no cassette and no meta on a replay run, whatever the verdicts", async () => {

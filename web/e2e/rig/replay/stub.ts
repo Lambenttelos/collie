@@ -80,7 +80,7 @@ export interface HarnessCounts {
   replayed: number;
   /** Requests passed on to OpenRouter. */
   proxied: number;
-  /** Live calls recorded to the end of their stream, including a call of a dropped recording that wrote nothing (settleRecording). */
+  /** Live calls recorded to the end of their stream, including a call whose recording was let go before it ended (a rollback, or the case named again), which writes nothing. */
   recorded: number;
   mismatches: number;
 }
@@ -269,7 +269,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
   };
 
   const writeCase = (plan: TierPlan, rec: Recording) => {
-    // A call still streaming when settleRecording put the earlier recording back holds a recording it dropped.
+    // A call still streaming when its recording was let go (forget: a rollback, or the case named again) writes nothing.
     if (plan.version === null || recordings.get(`${rec.harness}|${rec.caseId}`) !== rec) return;
     const dir = join(config.root, plan.harness, versionDir(plan.version));
     mkdirSync(dir, { recursive: true });
@@ -283,9 +283,40 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     writeMeta(plan);
   };
 
+  /** Let go of a case's recording: its next call starts a new one, numbered from 0, and a call still streaming for the old one writes nothing (writeCase). */
+  const forget = (h: StubHarness, caseId: string) => {
+    recordings.delete(`${h}|${caseId}`);
+    for (const k of ordinals.keys()) if (k.startsWith(`${h}|`) && k.split("|")[2] === caseId) ordinals.delete(k);
+  };
+
+  /**
+   * The leg names the case that runs now. A case named again (a retry, `--repeat-each`) starts a new
+   * recording, so its cassette holds that attempt's calls alone and its verdict settles only those.
+   * When a call of the earlier attempt still streams, that call now writes nothing, so the file the
+   * earlier attempt wrote lacks it: the case is marked failed, and a failing attempt keeps its own
+   * recording rather than putting that partial one back.
+   */
+  const nameCase = (caseId: string | null) => {
+    current = caseId;
+    closed.clear();
+    if (caseId === null) return;
+    for (const h of STUB_HARNESSES) {
+      const old = recordings.get(`${h}|${caseId}`);
+      const plan = config.plans[h];
+      if (old !== undefined && plan !== undefined && old.slots.includes(null) && old.slots.some((slot) => slot !== null)) {
+        const set = failedCases.get(h) ?? new Set<string>();
+        set.add(caseId);
+        failedCases.set(h, set);
+        writeMeta(plan);
+        log(`${h} ${caseId}: named again while a call of the earlier attempt still streams, marked failed`);
+      }
+      forget(h, caseId);
+    }
+  };
+
   /**
    * The life-cycle of a recording, decided where the verdict arrives (the case ran under recording):
-   *  - pass, no model call by this harness: its file and its meta entries are removed;
+   *  - pass, no model call by this harness in this attempt: its file and its meta entries are removed;
    *  - pass, with calls: the file is the new recording and the failed mark is cleared;
    *  - fail, and the file held a good recording (same model and skill, not marked failed): the old
    *    file comes back, meta.json too unless something else changed it since (stampedOnly), and one
@@ -298,7 +329,12 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     const rec = recordings.get(key);
     const passed = verdict === "pass";
     if (rec === undefined) {
-      if (passed && plan.version !== null && dropRecording(config.root, config.leg, h, plan.version, caseId)) log(`${h} ${caseId}: passed with no model call, recording removed`);
+      if (!passed || plan.version === null) return;
+      // An earlier attempt of the case in this run may have recorded it (nameCase): this run no longer holds it.
+      written.delete(join(config.root, h, versionDir(plan.version), caseFile(caseId)));
+      recordedCases.get(h)?.delete(caseId);
+      failedCases.get(h)?.delete(caseId);
+      if (dropRecording(config.root, config.leg, h, plan.version, caseId)) log(`${h} ${caseId}: passed with no model call, recording removed`);
       return;
     }
     if (passed || !rec.before.good) {
@@ -322,9 +358,8 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
     written.delete(file);
     recordedCases.get(h)?.delete(caseId);
     failedCases.get(h)?.delete(caseId);
-    recordings.delete(key);
+    forget(h, caseId);
     closed.add(key);
-    for (const k of ordinals.keys()) if (k.startsWith(`${h}|`) && k.split("|")[2] === caseId) ordinals.delete(k);
     log(`${h} ${caseId}: failed live (${verdict}), the earlier recording was not marked failed, kept`);
   };
 
@@ -468,8 +503,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
         const body = await readBody(req);
         // SAFETY: the leg's own POST (leg.ts stubCase), `{ "case": string | null }`.
         const asked = (JSON.parse(body) as { case: string | null }).case;
-        current = asked;
-        closed.clear();
+        nameCase(asked);
         log(`case ${asked ?? "(none)"}`);
         res.writeHead(204).end();
         return;
@@ -539,10 +573,7 @@ export async function startStub(config: StubConfig, port = 0, host = "127.0.0.1"
   log(`stub on ${host}:${String(bound)} (${Object.values(config.plans).map((p) => `${p.harness} ${p.tier}${p.record ? "+record" : ""}`).join(", ")})`);
   return {
     port: bound,
-    setCase: (caseId) => {
-      current = caseId;
-      closed.clear();
-    },
+    setCase: nameCase,
     stats: statsNow,
     close: () =>
       new Promise<void>((done) => {
