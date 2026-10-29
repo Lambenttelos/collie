@@ -2185,7 +2185,18 @@ export function startServer(opts: {
       if (action === "history" && req.method === "GET")
         return paneHistory(cfg, journals, transcripts, rt.engine, herdr, paneId, url, req);
       if (action === "chat" && req.method === "GET")
-        return paneChat(cfg, journals, live, rt.engine, herdr, paneId, url, req, rt.send === undefined ? undefined : (pane) => rt.send!.queuedOf(rt.name, pane));
+        return paneChat(
+          cfg,
+          journals,
+          live,
+          rt.engine,
+          herdr,
+          paneId,
+          url,
+          req,
+          rt.send === undefined ? undefined : (pane) => rt.send!.queuedOf(rt.name, pane),
+          rt.send === undefined ? undefined : (ids) => rt.send!.queuedLanded(ids),
+        );
       if (action === "changes" && req.method === "GET") return paneChanges(rt.engine, paneId, url, req, homedir(), cfg.redact);
       if (action === "files" && req.method === "GET")
         return paneFiles(rt.engine, paneId, url, req, filesPrivateFolders(cfg), homedir(), cfg.redact);
@@ -4500,7 +4511,9 @@ async function paneSubagent(
  * the requirement.
  *
  * `queuedOf` lists the pane's open queued sends from the session's Send Protocol (ADR 0122), absent
- * with the protocol off. Unmasked here; the window answer is masked whole below.
+ * with the protocol off. Unmasked here; the window answer is masked whole below. `queuedLanded` hands
+ * the protocol back those the journal shows as a prompt (journal/live.ts), so they go before that prompt
+ * leaves the window.
  */
 export async function paneChat(
   cfg: Config,
@@ -4512,6 +4525,7 @@ export async function paneChat(
   url: URL,
   req: Request,
   queuedOf?: (paneId: string) => readonly ReceiptQueued[],
+  queuedLanded?: (requestIds: readonly string[]) => void,
 ): Promise<Response> {
   const accept = req.headers.get("accept-encoding");
   const unavailable = (reason: "disabled" | "no-session" | "no-log", detail?: "shared-folder") =>
@@ -4541,7 +4555,7 @@ export async function paneChat(
   try {
     const read =
       params.before === undefined
-        ? await live.window(adapter, ref, params, queuedOf?.(paneId) ?? [])
+        ? await live.window(adapter, ref, params, queuedOf?.(paneId) ?? [], queuedLanded)
         : await live.older(adapter, ref, params.before, params.limit);
     if (read === null) return unavailable("no-log");
     // Masked before the ETag is hashed, so the tag describes what was actually sent (bridge/redact.ts).

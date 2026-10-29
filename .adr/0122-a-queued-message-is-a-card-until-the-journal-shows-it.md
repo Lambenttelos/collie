@@ -155,6 +155,52 @@ count, so "Please do these:" over "1. …" and "2. …" settles `sent` + `queued
   over its box (`❯ Title` over an indented metadata row) would read as an echo; the corpus test "no Claude
   dialog fixture reads otherwise without the echo rule" is the guard for each new capture.
 
+## A journal match the Chat sees ends the send, not only its card (addendum, 2026-10-29)
+
+Decision 1 dropped the card, but nothing told the Send Protocol: `QueuedSends` kept the send, and every
+poll that read the turn running kept its clock fresh. The window holds at most `MAX_LIVE_ENTRIES` turns
+and `MAX_LIVE_BYTES`. A window nobody polls for `WINDOW_IDLE_MS` goes, and the next one opens on the
+log's 2 MB tail; a poll that finds more than `CATCH_UP_BYTES` (8 MB) written since the last read resets
+onto that tail too. Once the prompt was outside the window, the delivered message was a card again:
+`queued` while the turn ran, `unconfirmed` after it.
+
+Now, when the Chat polls, the window hands back the request id of each send whose prompt it holds, and
+the protocol drops that send with its run, as on a prompt edge (`SendProtocol.queuedLanded`). A window
+that opened on a later tail or trimmed its front, and draws a card, also checks the sends against the
+History read behind its front, once per generation. That is the read the newest-prompt lookup
+(`claimLookup`) already makes, and the two share it when both ask on one poll. It finds a prompt that
+landed while no Chat polled, and the sends a restart seeds again (Limits, "Memory first").
+
+A landed send stays while a send with the same text is still open, or the open one would take its prompt
+on the next poll; both go once the journal shows a prompt for each. A send whose text the journal still
+lists as queued stays too, whatever user row it wrote. The receipt is not touched: only a prompt edge
+makes it `effective`, so after a restart a landed send is seeded again and found again. These limits
+stay:
+
+- **One poll of the card.** The History read does not hold the answer, so a window that finds the send
+  behind its front draws its card for one poll before it goes.
+- **A prompt more than 32 MB behind.** The History read is bounded (`MAX_TRANSCRIPT_BYTES`). A prompt
+  further behind the log's end is not found, and its send stays a card.
+- **Once per generation.** The read behind the front is claimed once per generation, not per pane or per
+  prompt. A prompt that lands and is trimmed off between two polls of a window that already looked is
+  missed. That takes more than `MAX_LIVE_ENTRIES` turns, or more than `MAX_LIVE_BYTES` of composed turns
+  (the weight of the turns the window holds, not bytes in the log), between two polls less than
+  `WINDOW_IDLE_MS` apart and under `CATCH_UP_BYTES`, past which the window resets into a generation
+  that looks again.
+- **The same words from elsewhere are now final.** On a harness whose journal does not list its queue
+  (OMP, pi, Codex, OpenCode), the same text typed at the desk, sent from another pane on the same
+  session, or submitted up to 2 s before the queued send's key (`PROMPT_SKEW_MS`) drops the send for
+  good, and the read behind the front widens that to any such prompt in the History read. If a Stop then
+  gives the queued copy back, no returned card is drawn and the receipt takes no `late: "returned"`. On
+  Claude Code the journal keeps a send while the queue the window read still lists the text, so of two
+  queued sends with one text the first delivery takes only the one the prompt edge closes (the newer, as
+  before); the older goes at the next. A window that opened after both enqueue rows reads no queue, and
+  then both go at the first delivery.
+- **Two queued sends with one text.** While one waits, the landed one stays. If its prompt leaves the
+  window first, both are cards again; when the second lands, the window gives that one prompt to the
+  older send, so the newer stays a card until a History read finds both prompts, or it turns
+  `unconfirmed`.
+
 ## Assumptions
 
 - **One clock.** The journal's prompt time and the receipt's submit time are compared with a 2 s skew.

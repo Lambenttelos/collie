@@ -26,6 +26,10 @@ import { AuditLog } from "../audit.ts";
 import { heldCancelRoute, sendReceiptsRoute, sendRoute, type SendRouteRuntime } from "../server.ts";
 import { RETURNED_CARD_DROPPED } from "../../web/src/lib/surface/send.ts";
 import { QUEUED_SEND_MS, type BoxReading } from "./queued.ts";
+import { LiveWindows } from "../journal/live.ts";
+import { NO_CHANGE, noQueue, noUnknowns, parseWith, type RowReducer } from "../journal/reduce.ts";
+import { TranscriptStore } from "../journal/store.ts";
+import type { JournalAdapter, TranscriptEntry } from "../journal/types.ts";
 
 const RULE = "─".repeat(40);
 const WIDTH = 38;
@@ -9077,6 +9081,27 @@ describe("a queued send that comes back to the box (ADR 0122)", () => {
     expect(other.protocol.queuedOf("main", "%1")).toEqual([]);
   });
 
+  test("sends the live window found as prompts go for good: their receipts stay sent, and a later draft of one's text is no card", async () => {
+    const r = omp();
+    r.pane.inTurn = true;
+    await r.send("second message", { id: "queued-back-0043" });
+    await r.send("and a third", { id: "queued-back-0044" });
+    // The window hands back ids from the cards it was given, every one it found in one call.
+    expect(r.protocol.queuedOf("main", "%1")).toMatchObject([
+      { requestId: "queued-back-0043", state: "queued" },
+      { requestId: "queued-back-0044", state: "queued" },
+    ]);
+    r.protocol.queuedLanded(["queued-back-0043", "queued-back-0044"]);
+    expect(r.protocol.queuedOf("main", "%1")).toEqual([]);
+    // Only a prompt edge makes a receipt effective.
+    expect(r.deps.store.get("queued-back-0043")?.receipt).toMatchObject({ outcome: "sent", queued: true });
+    expect(r.deps.store.get("queued-back-0044")?.receipt).toMatchObject({ outcome: "sent", queued: true });
+    // The same words typed at the desk later are a draft, not the message coming back.
+    r.clock.now += 1_000;
+    expect(r.protocol.boxRead("main", "%1", reading("second message", r.clock.now))).toEqual([]);
+    expect(r.deps.store.get("queued-back-0043")?.receipt?.late).toBeUndefined();
+  });
+
   test("the clock counts from the last busy read: a long turn keeps its card; past the bound it turns unconfirmed, never gone", async () => {
     const r = omp();
     r.pane.inTurn = true;
@@ -9304,6 +9329,52 @@ describe("a queued send that comes back to the box (ADR 0122)", () => {
     const second = rig({ pane: new OmpPane(), harness: "omp", version: "18.6.1", clock, storeDir });
     expect(second.protocol.queuedOf("main", "%1")).toMatchObject([{ requestId: "queued-back-0041", text: "still waiting", state: "queued" }]);
     expect(second.protocol.queuedOf("other", "%1")).toEqual([]);
+  });
+
+  test("after a restart a seeded send whose prompt is behind the window's tail goes on the History read, and its receipt stays sent", async () => {
+    const clock = { now: 1_000_000 };
+    const storeDir = join(dir, "sends-restart-landed");
+    const firstPane = new OmpPane();
+    const first = rig({ pane: firstPane, harness: "omp", version: "18.6.1", clock, storeDir });
+    firstPane.inTurn = true;
+    await first.send("still waiting", { id: "queued-back-0051" });
+    await first.send("not taken yet", { id: "queued-back-0052" });
+    // OMP took the first one 30 s later and wrote a long run after it; then the bridge restarted.
+    const turns = new Map<string, TranscriptEntry>([
+      ["p1", { uuid: "p1", ts: new Date(clock.now + 30_000).toISOString(), role: "user", parts: [{ kind: "text", text: "still waiting" }] }],
+      ...Array.from({ length: 40 }, (_, i): [string, TranscriptEntry] => [`w${i}`, { uuid: `w${i}`, ts: "", role: "assistant", parts: [{ kind: "text", text: "out" }] }]),
+    ]);
+    const log = [...turns.keys()];
+    clock.now += 60_000;
+    const second = rig({ pane: new OmpPane(), harness: "omp", version: "18.6.1", clock, storeDir });
+    const reducer = (): RowReducer => ({
+      push: (row) => {
+        const turn = turns.get(row);
+        return turn === undefined ? NO_CHANGE : { added: [turn], changed: NO_CHANGE.changed };
+      },
+      unknowns: noUnknowns,
+      queued: noQueue,
+    });
+    const adapter: JournalAdapter = {
+      agent: "omp",
+      parse: (text) => parseWith(reducer(), text),
+      reducer,
+      source: {
+        resolve: async () => "/fake/omp.jsonl",
+        stat: async () => ({ size: log.length, mtimeMs: 1 }),
+        load: async () => ({ text: log.join("\n"), complete: true, size: log.length, mtimeMs: 1 }),
+        // The window's opening read is a tail that starts after the prompt, as a 2 MB tail of a long log does.
+        readSince: async () => ({ lines: log.slice(10), cursor: "", reset: true, fromStart: false }),
+      },
+    };
+    const live = new LiveWindows(new TranscriptStore(), () => clock.now);
+    const body = await live.window(adapter, { kind: "id", value: "s1" }, { limit: 10 }, second.protocol.queuedOf("main", "%1"), (requestIds) => second.protocol.queuedLanded(requestIds));
+    // The read behind the front does not hold the answer, so this one poll still draws both.
+    expect(body!.queuedSends?.map((card) => card.requestId)).toEqual(["queued-back-0051", "queued-back-0052"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(second.protocol.queuedOf("main", "%1")).toMatchObject([{ requestId: "queued-back-0052", state: "queued" }]);
+    // The receipt is not touched, so the next restart seeds it again, and the next window looks again.
+    expect(second.deps.store.get("queued-back-0051")?.receipt).toMatchObject({ outcome: "sent", queued: true });
   });
 });
 

@@ -5732,6 +5732,38 @@ describe("paneHistory — two muse tabs in one workspace read their own transcri
     }
   });
 
+  test("the chat route hands back the queued sends whose prompts the journal holds, and only those", async () => {
+    const base = await realpath(await mkdtemp(join(tmpdir(), "collie-muse-route-")));
+    try {
+      await sessionLog(base, UUID_A, [metadata("/same"), accepted("alpha from session A")]);
+      const journals = { muse: museJournal([base]) };
+      const live = new LiveWindows(new TranscriptStore());
+      const stub: Partial<StateEngine> = {
+        current: () => ({ agents: [view("w1:p1")], shellPanes: [], workspaces: [], tabs: [], bridge: "connected" }),
+      };
+      // SAFETY: paneChat reaches only `current()` (for the pane lookup) on the paths read here.
+      const engine = stub as StateEngine;
+      const mux = {
+        capabilities: declareCapabilities({ supports: ["paneGrid"], topologyLatency: { kind: "push" } }),
+        readGrid: async () => muxGone("no screen"),
+        foregroundProcesses: async () => muxOk([{ argv: ["muse"] }]),
+      };
+      // The log's prompt was written a second after this send's submit key: the harness took it.
+      const promptAt = Math.floor(1790904354495081 / 1000);
+      const queuedOf = () => [
+        { requestId: "req-landed-001", text: "alpha from session A", at: promptAt - 1_000, state: "queued" as const },
+        { requestId: "req-queued-0001", text: "still waiting", at: promptAt - 1_000, state: "queued" as const },
+      ];
+      const landed: string[] = [];
+      const url = new URL("http://x/api/pane/w1:p1/chat");
+      const res = await paneChat(cfg(), journals, live, engine, mux, "w1:p1", url, new Request(url), queuedOf, (ids) => landed.push(...ids));
+      expect(res.status).toBe(200);
+      expect(landed).toEqual(["req-landed-001"]);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   test("a multiplexer without the call keeps the newest-wins fallback", async () => {
     const base = await realpath(await mkdtemp(join(tmpdir(), "collie-muse-route-")));
     try {

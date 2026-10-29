@@ -466,6 +466,8 @@ class LiveWindow {
    * nothing. Older turns do not change, so one answer holds for the whole generation.
    */
   private behind: { gen: number; prompt: ChatPrompt | null } | null = null;
+  /** The generation that last looked its queued sends up behind its front (see {@link LiveWindows.window}). */
+  private receiptsBehind: number | null = null;
   /** Whether a read has ever run. The floor below has nothing to measure against until it has. */
   private ticked = false;
   private lastTickAt = 0;
@@ -628,7 +630,7 @@ class LiveWindow {
    * everything after each instead, held to `limit` rows at least and {@link MAX_PAGE_ROWS} at most
    * (`journal/turns.ts`). That is a first paint.
    */
-  body(after: ChatAfter | null, limit: number, receipts: readonly ReceiptQueued[] = []): ChatWindowBody {
+  body(after: ChatAfter | null, limit: number, receipts: readonly ReceiptQueued[] = [], landed?: (requestIds: readonly string[]) => void): ChatWindowBody {
     const rows =
       after !== null && after.gen === this.gen
         ? this.rows.filter((row) => row.rev > after.rev)
@@ -652,8 +654,9 @@ class LiveWindow {
     if (this.adapter.sendQueuedNow !== undefined) body.sendQueuedNow = [...this.adapter.sendQueuedNow];
     // Collie's own queued sends (ADR 0122), checked against every prompt the window holds, not the page.
     if (receipts.length > 0) {
-      const cards = receiptQueue(receipts, this.rows.map((row) => row.entry), this.adapter.recordsQueue === true, body.queued);
-      if (cards.length > 0) body.queuedSends = cards;
+      const queue = receiptQueue(receipts, this.rows.map((row) => row.entry), this.adapter.recordsQueue === true, body.queued);
+      if (queue.cards.length > 0) body.queuedSends = queue.cards;
+      if (queue.landed.length > 0) landed?.(queue.landed);
     }
     // Over every row the window holds, not the `limit` sent: the point is the prompt the first paint
     // left out. A window that opened mid-run holds none, and then the one looked up behind its front
@@ -698,6 +701,17 @@ class LiveWindow {
   /** The lookup's answer, kept only if the generation it was asked for is still this one. */
   settleLookup(gen: number, prompt: ChatPrompt | null): void {
     if (gen === this.gen) this.behind = { gen, prompt };
+  }
+
+  /**
+   * Whether this generation should look its queued sends up behind its front: older turns exist, and it
+   * has not asked yet. Asking marks it, so a session costs at most one such lookup per generation.
+   */
+  claimReceiptLookup(): boolean {
+    if (this.receiptsBehind === this.gen) return false;
+    if (!(this.trimmed || !this.fromStart)) return false;
+    this.receiptsBehind = this.gen;
+    return true;
   }
 }
 
@@ -746,13 +760,17 @@ export class LiveWindows {
    *
    * `receipts` are the pane's open queued sends from Collie's own receipts (ADR 0122): the answer lists
    * those the journal does not show as a prompt yet. Per pane, not per window: two panes on one session
-   * each see their own sends.
+   * each see their own sends. `landed` hears the request ids of those the journal shows as a prompt,
+   * so the protocol can let them go: the ones the window holds on every poll, and, once per generation
+   * that opened past its front or trimmed it, the ones the History read finds behind it
+   * (journal/receipt-queue.ts).
    */
   async window(
     adapter: JournalAdapter,
     ref: AgentSessionRef,
     params: ChatParams,
     receipts: readonly ReceiptQueued[] = [],
+    landed?: (requestIds: readonly string[]) => void,
   ): Promise<ChatWindowBody | null> {
     const key = (await adapter.source.resolve(ref)) ?? (await adapter.source.pending?.(ref)) ?? null;
     if (key === null) return null;
@@ -767,16 +785,30 @@ export class LiveWindows {
     // The window opened mid-run (its first read is a 2 MB tail, and a long tool run fills that with
     // no prompt in it): look the prompt up in the History read, once per generation and WITHOUT
     // holding this answer for it. The next poll carries what it found. That read is the one a
-    // "load older" tap or the History page already makes, and it is paid only by a window that
-    // holds no prompt at all, never by an ordinary poll.
+    // "load older" tap or the History page already makes, and an ordinary poll never pays it: a
+    // generation asks at most once for its prompt, when it holds none, and once for its queued sends
+    // (below), and both share one read when they ask on one poll.
     const gen = window.claimLookup();
-    if (gen !== null) {
+    const body = window.body(params.after ?? null, params.limit, receipts, landed);
+    // A queued send whose prompt landed while no Chat polled, or before a restart, is behind the front
+    // too: the same read looks for it, once per generation that draws a card.
+    const sends = landed !== undefined && body.queuedSends !== undefined && window.claimReceiptLookup() ? landed : null;
+    if (gen !== null || sends !== null) {
+      const listed = body.queued;
       void this.store.cached(adapter, ref).then(
-        (found) => window.settleLookup(gen, found === null ? null : newestPrompt(found.entries, (e) => e)),
-        () => window.settleLookup(gen, null),
+        (found) => {
+          if (gen !== null) window.settleLookup(gen, found === null ? null : newestPrompt(found.entries, (e) => e));
+          if (sends === null || found === null) return undefined;
+          const queue = receiptQueue(receipts, found.entries, adapter.recordsQueue === true, listed);
+          if (queue.landed.length > 0) sends(queue.landed);
+          return undefined;
+        },
+        () => {
+          if (gen !== null) window.settleLookup(gen, null);
+        },
       );
     }
-    return window.body(params.after ?? null, params.limit, receipts);
+    return body;
   }
 
   /**

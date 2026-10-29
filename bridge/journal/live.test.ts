@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { computeEtag } from "../http-cache.ts";
+import { QueuedSends } from "../surface/queued.ts";
 import { decodeCursor, encodeCursor, NO_CURSOR } from "./cursor.ts";
 import {
   chatParams,
@@ -207,6 +208,21 @@ const thread = (n: number): string[] =>
 
 function windows(fx: ReturnType<typeof fakeJournal>): LiveWindows {
   return new LiveWindows(new TranscriptStore(), fx.clock);
+}
+
+/** The fake read as a bounded tail: an opening read keeps only its last `keep` rows. */
+function tailOf(fx: ReturnType<typeof fakeJournal>, keep: number): JournalAdapter {
+  const source = fx.adapter.source;
+  return {
+    ...fx.adapter,
+    source: {
+      ...source,
+      async readSince(key, cursor) {
+        const read = await source.readSince(key, cursor);
+        return read.reset ? { ...read, lines: read.lines.slice(-keep), fromStart: false } : read;
+      },
+    },
+  };
 }
 
 // ── The two tokens ───────────────────────────────────────────────────────────
@@ -967,6 +983,221 @@ describe("what is queued, from the receipts", () => {
     expect("queuedSends" in claude!).toBe(false);
     expect(claude!.queued).toEqual([]);
   });
+
+  /**
+   * The Send Protocol's own memory of the pane's queued sends, polled the way the chat route polls it:
+   * the window gets the open sends each time, and the sends it reports landed are let go.
+   */
+  function protocolMemory(open: readonly ReceiptQueued[] = sends()) {
+    const queued = new QueuedSends({
+      store: { list: () => [], markReturned: () => true },
+      generation: () => "fake:s1",
+      matches: () => false,
+      now: () => AT + 60_000,
+      busy: () => false,
+    });
+    for (const send of open) queued.add({ id: send.requestId, session: "main", paneId: "%1", generation: "fake:s1", text: send.text, collapse: null, at: send.at });
+    return { of: () => queued.of("main", "%1"), landed: (ids: readonly string[]) => ids.forEach((id) => queued.drop(id)) };
+  }
+
+  test("a send the journal showed as a prompt does not come back once that prompt is trimmed off the window", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p1", "List 120 fruits", AT - 10_000), say("u1")]);
+    const live = windows(fx);
+    const first = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(first!.queuedSends).toHaveLength(2);
+    fx.append(askAt("p2", "second message", AT + 30_000));
+    fx.settle();
+    const landed = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    expect(landed!.queuedSends).toEqual([{ requestId: "req-second-002", state: "queued", text: "and a third" }]);
+    // The agent works on: its output pushes the prompt off the window's front.
+    fx.append(...Array.from({ length: MAX_LIVE_ENTRIES }, (_, i) => say(`w${i}`)));
+    fx.settle();
+    const later = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: landed!.gen, rev: landed!.rev } }, memory.of(), memory.landed);
+    expect(later!.oldest).toBeGreaterThan(SEQ_BASE + 2);
+    expect(later!.queuedSends).toEqual([{ requestId: "req-second-002", state: "queued", text: "and a third" }]);
+  });
+
+  test("nor when the window is dropped and reopens on a tail that starts after that prompt", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p1", "List 120 fruits", AT - 10_000), say("u1"), askAt("p2", "second message", AT + 30_000), say("u2")]);
+    const live = windows(fx);
+    const open = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(open!.queuedSends).toEqual([{ requestId: "req-second-002", state: "queued", text: "and a third" }]);
+    // Nobody reads the chat for a while, so the window goes; the next one opens on the log's tail.
+    fx.advance(WINDOW_IDLE_MS + 1);
+    fx.state.lines = [say("u3"), say("u4")];
+    fx.state.fromStart = false;
+    const reopened = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(reopened!.gen).not.toBe(open!.gen);
+    expect(reopened!.queuedSends).toEqual([{ requestId: "req-second-002", state: "queued", text: "and a third" }]);
+  });
+
+  test("nor when the agent wrote past it while nobody polled: the History read behind the later tail lets it go", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p1", "List 120 fruits", AT - 10_000), say("u1")]);
+    const live = windows(fx);
+    const open = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(open!.queuedSends).toHaveLength(2);
+    // A window that holds the log from its start has nothing behind it to read.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(0);
+    // The phone is put away, so the window goes. The agent takes the first send and writes on, so the
+    // next window opens on a tail (2 MB of a real log) that starts after that prompt.
+    fx.advance(WINDOW_IDLE_MS + 1);
+    fx.append(askAt("p2", "second message", AT + 30_000), ...Array.from({ length: 50 }, (_, i) => say(`w${i}`)));
+    const tail = tailOf(fx, 40);
+    const reopened = await live.window(tail, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(reopened!.gen).not.toBe(open!.gen);
+    // The read behind the front does not hold the answer, so this one poll still draws the card.
+    expect(reopened!.queuedSends?.map((card) => card.requestId)).toEqual(["req-first-0001", "req-second-002"]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(memory.of().map((send) => send.requestId)).toEqual(["req-second-002"]);
+    fx.settle();
+    const next = await live.window(tail, ref(), { limit: 10, after: { gen: reopened!.gen, rev: reopened!.rev } }, memory.of(), memory.landed);
+    expect(next!.queuedSends).toEqual([{ requestId: "req-second-002", state: "queued", text: "and a third" }]);
+    // The same read found the prompt the window lacks, and the generation asks for no other.
+    expect(next!.lastPrompt?.uuid).toBe("p2");
+    fx.append(say("w-late"));
+    fx.settle();
+    await live.window(tail, ref(), { limit: 10, after: { gen: next!.gen, rev: next!.rev } }, memory.of(), memory.landed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(1);
+  });
+
+  test("and that read does not let a send go for an identical prompt from before its key", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p0", "second message", AT - 60_000), say("u1"), ...Array.from({ length: 50 }, (_, i) => say(`w${i}`))]);
+    const body = await windows(fx).window(tailOf(fx, 40), ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(body!.queuedSends).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(1);
+    expect(memory.of().map((send) => send.requestId)).toEqual(["req-first-0001", "req-second-002"]);
+  });
+
+  test("a window that draws no card reads nothing behind its front for the sends", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([...Array.from({ length: 50 }, (_, i) => say(`w${i}`)), askAt("p1", "second message", AT + 30_000), askAt("p2", "and a third", AT + 40_000)]);
+    const body = await windows(fx).window(tailOf(fx, 40), ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect("queuedSends" in body!).toBe(false);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(0);
+    expect(memory.of()).toEqual([]);
+  });
+
+  test("a window that held the log from its start and trims its front between two polls looks behind it, and the send goes", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p1", "List 120 fruits", AT - 10_000), say("u1")]);
+    const live = windows(fx);
+    const first = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(0);
+    // Between two polls the agent takes the first send and writes enough to trim that prompt off.
+    fx.append(askAt("p2", "second message", AT + 30_000), ...Array.from({ length: MAX_LIVE_ENTRIES }, (_, i) => say(`w${i}`)));
+    fx.settle();
+    const trimmed = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    expect(trimmed!.gen).toBe(first!.gen);
+    expect(trimmed!.queuedSends).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(memory.of().map((send) => send.requestId)).toEqual(["req-second-002"]);
+  });
+
+  test("a window that resets onto a later tail, as a catch-up past CATCH_UP_BYTES does, looks behind its front again", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal(Array.from({ length: 50 }, (_, i) => say(`o${i}`)));
+    const tail = tailOf(fx, 40);
+    const live = windows(fx);
+    const first = await live.window(tail, ref(), { limit: 10 }, memory.of(), memory.landed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(1);
+    fx.append(askAt("p2", "second message", AT + 30_000), ...Array.from({ length: 50 }, (_, i) => say(`w${i}`)));
+    fx.state.rewound = true;
+    fx.settle();
+    const reset = await live.window(tail, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    expect(reset!.gen).not.toBe(first!.gen);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(2);
+    expect(memory.of().map((send) => send.requestId)).toEqual(["req-second-002"]);
+  });
+
+  test("one read behind the front lets every send it finds go", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([askAt("p1", "second message", AT + 30_000), askAt("p2", "and a third", AT + 40_000), ...Array.from({ length: 50 }, (_, i) => say(`w${i}`))]);
+    const body = await windows(fx).window(tailOf(fx, 40), ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(body!.queuedSends).toHaveLength(2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(memory.of()).toEqual([]);
+  });
+
+  test("a read behind the front for the sends alone leaves the newest-prompt lookup its own claim", async () => {
+    const memory = protocolMemory();
+    const fx = fakeJournal([...Array.from({ length: 50 }, (_, i) => say(`o${i}`)), askAt("p5", "an older ask", AT - 5_000), say("u5")]);
+    const tail = tailOf(fx, 40);
+    const live = windows(fx);
+    // The tail holds a prompt, so only the sends are looked up behind it.
+    const first = await live.window(tail, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(first!.lastPrompt?.uuid).toBe("p5");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(1);
+    // A newer prompt, then enough output to trim it off: now the window holds none and looks it up.
+    fx.append(askAt("p6", "the newer ask", AT + 60_000), ...Array.from({ length: MAX_LIVE_ENTRIES }, (_, i) => say(`w${i}`)));
+    fx.settle();
+    const trimmed = await live.window(tail, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    fx.settle();
+    const next = await live.window(tail, ref(), { limit: 10, after: { gen: trimmed!.gen, rev: trimmed!.rev } }, memory.of(), memory.landed);
+    expect(next!.lastPrompt?.uuid).toBe("p6");
+  });
+
+  test("a landed send stays while one with the same text waits, so the waiting one keeps its card", async () => {
+    const memory = protocolMemory([
+      { requestId: "req-twice-0001", text: "yes", at: AT, state: "queued" },
+      { requestId: "req-twice-0002", text: "yes", at: AT + 1_000, state: "queued" },
+    ]);
+    const fx = fakeJournal([askAt("p1", "yes", AT + 20_000)]);
+    const live = windows(fx);
+    const first = await live.window(fx.adapter, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(first!.queuedSends).toEqual([{ requestId: "req-twice-0002", state: "queued", text: "yes" }]);
+    fx.settle();
+    const again = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    expect(again!.queuedSends).toEqual([{ requestId: "req-twice-0002", state: "queued", text: "yes" }]);
+    // The second one lands too: now each has its prompt, and both go.
+    fx.append(askAt("p2", "yes", AT + 50_000));
+    fx.settle();
+    const both = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: again!.gen, rev: again!.rev } }, memory.of(), memory.landed);
+    expect("queuedSends" in both!).toBe(false);
+    expect(memory.of()).toEqual([]);
+  });
+
+  test("a harness that writes the user row when it queues: the send stays while the journal lists its text, and goes once the queue drains", async () => {
+    const memory = protocolMemory([{ requestId: "req-goon-00001", text: "go on", at: AT, state: "queued" }]);
+    const fx = fakeJournal([askAt("p1", "go on", AT + 100), queue("go on")]);
+    const recording: JournalAdapter = { ...fx.adapter, recordsQueue: true };
+    const live = windows(fx);
+    const first = await live.window(recording, ref(), { limit: 10 }, memory.of(), memory.landed);
+    expect(first!.queued).toEqual(["go on"]);
+    expect(memory.of().map((send) => send.requestId)).toEqual(["req-goon-00001"]);
+    // The queue drains: now the prompt is the send's, and it goes.
+    fx.append(queue());
+    fx.settle();
+    await live.window(recording, ref(), { limit: 10, after: { gen: first!.gen, rev: first!.rev } }, memory.of(), memory.landed);
+    expect(memory.of()).toEqual([]);
+  });
+
+  test("and the read behind the front keeps it too, when a returned card asks for that read", async () => {
+    const open: ReceiptQueued[] = [
+      { requestId: "req-goon-00001", text: "go on", at: AT, state: "queued" },
+      { requestId: "req-back-00001", text: "popped back", at: AT + 5_000, state: "returned" },
+    ];
+    const fx = fakeJournal([askAt("p1", "go on", AT + 100), ...Array.from({ length: 50 }, (_, i) => say(`w${i}`)), queue("go on")]);
+    const recording: JournalAdapter = { ...tailOf(fx, 40), recordsQueue: true };
+    const landed: string[] = [];
+    const body = await windows(fx).window(recording, ref(), { limit: 10 }, open, (ids) => landed.push(...ids));
+    expect(body!.queuedSends).toEqual([{ requestId: "req-back-00001", state: "returned", text: "popped back" }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(fx.calls.load).toBe(1);
+    expect(landed).toEqual([]);
+  });
 });
 
 // ── the operator's newest prompt rides the body too ─────────────────────────
@@ -1015,21 +1246,6 @@ describe("the newest prompt", () => {
     const last = await live.window(fx.adapter, ref(), { limit: 10, after: { gen: next!.gen, rev: next!.rev } });
     expect(last!.lastPrompt?.uuid).toBe("p2");
   });
-
-  /** The fake read as a bounded tail: an opening read keeps only its last `keep` rows. */
-  function tailOf(fx: ReturnType<typeof fakeJournal>, keep: number): JournalAdapter {
-    const source = fx.adapter.source;
-    return {
-      ...fx.adapter,
-      source: {
-        ...source,
-        async readSince(key, cursor) {
-          const read = await source.readSince(key, cursor);
-          return read.reset ? { ...read, lines: read.lines.slice(-keep), fromStart: false } : read;
-        },
-      },
-    };
-  }
 
   test("a window that opened mid-run looks the prompt up behind its front, once, without waiting for it", async () => {
     const fx = fakeJournal([ask("p1", "the real question"), say("u1"), say("u2"), say("u3")]);

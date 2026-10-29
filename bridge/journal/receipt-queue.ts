@@ -9,6 +9,15 @@
 // Claude Code's reducer lets one delivery clear one place. Two identical texts queued are two cards,
 // and one prompt clears one of them.
 //
+// A send whose prompt the window holds when the Chat polls is not only hidden: the window hands its
+// request id back (`landed`), and the protocol lets it go. The window holds only so many turns, so a
+// send kept past its prompt would be a card again once that prompt left the window, or when a window
+// opens on a later tail. A window that opened on a later tail or trimmed its front, and draws a card,
+// also asks once per generation in the History read behind it (journal/live.ts), for a prompt that
+// landed while no Chat polled, or before a restart. One exception: while a send with the same text is
+// still open, the landed one stays, or the open one would take its prompt on the next poll. Both go
+// once the journal shows a prompt for each. What this cannot see is in ADR 0122's 2026-10-29 addendum.
+//
 // A harness whose journal DOES record its queue (`JournalAdapter.recordsQueue`, Claude Code and Muse)
 // keeps the journal as the source of the queued cards; the receipts add only cards that came back to the
 // box, which no journal records as a queue. That flag is an optimisation, not the guard: a receipt card
@@ -75,19 +84,37 @@ export function stillOpen(sends: readonly ReceiptQueued[], entries: readonly Tra
   return open;
 }
 
-/**
- * The window's receipt cards: the sends the journal does not show as a prompt yet, less every card whose
- * text the journal lists as queued, and, for a harness that records its queue, less every card that is
- * not back in the box.
- */
+/** What the journal says of the pane's receipts: the window's cards, and the sends it shows landed. */
+export interface ReceiptQueue {
+  /**
+   * The window's receipt cards: the sends the journal does not show as a prompt yet, less every card
+   * whose text the journal lists as queued, and, for a harness that records its queue, less every card
+   * that is not back in the box.
+   */
+  readonly cards: QueuedSendWire[];
+  /**
+   * The request ids of the sends the journal shows as a prompt, for the protocol to let go, less any
+   * whose text a send still open shares (see the header) or the journal still lists as queued.
+   */
+  readonly landed: string[];
+}
+
+/** The window's receipt cards, and the sends whose prompts the window holds. */
 export function receiptQueue(
   sends: readonly ReceiptQueued[],
   entries: readonly TranscriptEntry[],
   recordsQueue: boolean,
   journalQueued: readonly string[],
-): QueuedSendWire[] {
+): ReceiptQueue {
   const listed = new Set(journalQueued.map(folded));
-  return stillOpen(sends, entries)
-    .filter((send) => (!recordsQueue || send.state === "returned") && !listed.has(folded(send.text)))
-    .map((send) => ({ requestId: send.requestId, state: send.state, text: send.text }));
+  const open = stillOpen(sends, entries);
+  const waiting = new Set(open.map((send) => folded(send.text)));
+  return {
+    cards: open
+      .filter((send) => (!recordsQueue || send.state === "returned") && !listed.has(folded(send.text)))
+      .map((send) => ({ requestId: send.requestId, state: send.state, text: send.text })),
+    // Every open send shares its own text, so `waiting` keeps the open ones out too. A text the journal
+    // still lists as queued is not taken yet, whatever user row it wrote.
+    landed: sends.filter((send) => !waiting.has(folded(send.text)) && !listed.has(folded(send.text))).map((send) => send.requestId),
+  };
 }

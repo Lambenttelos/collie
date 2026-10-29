@@ -2465,10 +2465,20 @@ export class SendProtocol {
   /**
    * The pane's open queued sends, oldest first (ADR 0122): sends that settled `sent` + `queued` inside
    * the bound, each `queued` or `returned`. The live window decides which of them the journal already
-   * shows as a prompt; this only lists what Collie's receipts left open.
+   * shows as a prompt, and hands those back to {@link queuedLanded}; this only lists what Collie's
+   * receipts left open.
    */
   queuedOf(session: string, paneId: string): ReceiptQueued[] {
     return this.queuedSends.of(session, paneId);
+  }
+
+  /**
+   * The journal shows a prompt for each of these queued sends, in the live window or in the History read
+   * behind its front (journal/receipt-queue.ts): the harness took them, so they go, each with its run, as
+   * on a prompt edge. The receipt stays `sent`: only a prompt edge makes it `effective`.
+   */
+  queuedLanded(requestIds: readonly string[]): void {
+    for (const id of requestIds) this.queuedSends.drop(id);
   }
 
   /**

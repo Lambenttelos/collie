@@ -179,7 +179,7 @@ export class QueuedSends {
     this.age();
   }
 
-  /** The send closed another way (a prompt edge confirmed it, a Send from its card took it): it goes, with its run. */
+  /** The send closed another way (a prompt edge confirmed it, the journal showed its prompt, a Send from its card took it): it goes, with its run. */
   drop(id: string): void {
     const group = this.entries.find((entry) => entry.id === id)?.group ?? id;
     this.entries = this.entries.filter((entry) => entry.id !== id && (entry.group ?? entry.id) !== group);
