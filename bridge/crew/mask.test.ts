@@ -4,15 +4,21 @@
 // Placeholders only: the fake key is built at run time, so no key shape sits in this file.
 import { describe, expect, test } from "bun:test";
 
-import { maskChatBody, maskClearReceipt, maskDiff, maskFileBody, maskHistoryPage, maskPaneRead, maskSnapshotTitles, maskTodoList } from "../answer-mask.ts";
+import { maskChatBody, maskClearReceipt, maskConversationRows, maskDiff, maskFileBody, maskHistoryPage, maskPaneRead, maskSendAnswer, maskSnapshotPanes, maskTodoList } from "../answer-mask.ts";
+import { muxOk, type MuxConversationPage } from "../mux/types.ts";
+import { durableConversations } from "../server.ts";
 import type { ChatWindowBody } from "../journal/live.ts";
 import type { TranscriptEntry } from "../journal/types.ts";
-import type { ChangeDiff, FileReadAnswer, PaneReadResponse } from "../types.ts";
+import type { ChangeDiff, FileReadAnswer, PaneReadResponse, PaneWire, SnapshotResponse } from "../types.ts";
+import type { HoldNote } from "../../web/src/lib/surface/hold.ts";
+import type { HeldRow } from "../../web/src/lib/surface/send.ts";
+import type { Ask, Surface } from "../../web/src/lib/surface/surface.ts";
 import { DEFAULT_MAX_UPLOAD_BYTES } from "../uploads.ts";
 import { forwardToPeer, saltTag, textAnswerOf, unsaltIfNoneMatch, type ForwardDeps, type ForwardTransport } from "./forward.ts";
 import { maskForwardedAnswer } from "./mask.ts";
 import type { CrewLink, PeerOutcome } from "./peer-client.ts";
 import type { PeerState } from "./registry.ts";
+import { mergeSnapshot, parsePeerSnapshot, type PeerSnapshotWire } from "./merge.ts";
 
 const key = `sk-test-placeholder-${"0".repeat(40)}`;
 const masked = `sk-t${"•".repeat(key.length - 4)}`;
@@ -119,9 +125,29 @@ const diff: ChangeDiff = {
   diff: `@@ -1 +1 @@\n-KEY=old\n+KEY=${key}\n`,
 };
 const fileText: FileReadAnswer = { available: true, root: "/home/a/p", path: ".env", size: 80, binary: false, truncated: false, text: `KEY=${key}\n` };
+// A Surface that read a permission dialog: its option labels are rows of the screen.
+const ask: Ask = { id: "ask-0123456789abcd", kind: "permission", options: [{ id: "1", label: "Yes" }, { id: "2", label: `Yes, and use ${key}` }], channel: "keys", hash: "0abc12" };
+const surface: Surface = { revision: 4, turn: "idle", modal: { ask }, composer: "unknown" };
+// A reply the Send Protocol refused on that screen (M56 spec 06), as a member that does not mask answers it.
+const reply = {
+  ok: false,
+  textDelivered: false,
+  error: "The input box is not free.",
+  code: "reply.send_failed",
+  send: { receipt: { requestId: "phone-req-0001", outcome: "refused", reason: "not_free" }, surface, offers: ["keys"] },
+};
+// A durable program's conversation list (M53 spec 11): the titles and subtitles are the program's words.
+const conversations = {
+  available: true,
+  items: [
+    { id: "conv-1", title: `Ticket ${key}`, subtitle: `about ${key}`, startedAt: "2026-10-13T09:00:00.000Z", state: "open", items: 2, paneId: "conv-1" },
+    { id: "conv-2", title: "Plain words", startedAt: "2026-10-12T09:00:00.000Z", state: "closed", items: 1 },
+  ],
+  next: "c1",
+};
 
 describe("which answers the lead masks", () => {
-  test("the mirror, History, Chat, Changes and Files, by pane and by space, and a Clear's receipt; never a picture or a blob", () => {
+  test("the mirror, History, Chat, Changes and Files, by pane and by space, the conversation list, a reply and a Clear's receipt; never a picture or a blob", () => {
     expect(textAnswerOf("pane/w1%3Ap1")).toBe("pane");
     expect(textAnswerOf("pane/w1%3Ap1/history")).toBe("history");
     expect(textAnswerOf("pane/w1%3Ap1/chat")).toBe("chat");
@@ -129,8 +155,10 @@ describe("which answers the lead masks", () => {
     expect(textAnswerOf("workspace/w1/changes")).toBe("changes");
     expect(textAnswerOf("pane/w1%3Ap1/files")).toBe("files");
     expect(textAnswerOf("workspace/w1/files")).toBe("files");
+    expect(textAnswerOf("durable/conversations")).toBe("conversations");
+    expect(textAnswerOf("pane/w1%3Ap1/reply")).toBe("reply");
     expect(textAnswerOf("pane/w1%3Ap1/clear")).toBe("clear");
-    for (const route of ["pane/w1/files/image", "workspace/w1/files/image", `blobs/${"ab".repeat(32)}`, "launchers", "folders", "pane/w1/reply", "tab"]) {
+    for (const route of ["pane/w1/files/image", "workspace/w1/files/image", `blobs/${"ab".repeat(32)}`, "launchers", "folders", "pane/w1/keys", "pane/w1/answer", "pane/w1/send", "durable/conversation/c1/reopen", "tab"]) {
       expect(textAnswerOf(route)).toBeNull();
     }
   });
@@ -146,6 +174,7 @@ describe("a member's key reaches the phone masked through the lead", () => {
     ["a Changes diff asked by space", "/api/workspace/w1/changes", JSON.stringify({ workspaceId: "w1", ...diff })],
     ["a Files body", "/api/pane/w1:p1/files", JSON.stringify({ paneId: "w1:p1", ...fileText })],
     ["a Files body asked by space", "/api/workspace/w1/files", JSON.stringify({ workspaceId: "w1", ...fileText })],
+    ["a durable program's conversation list", "/api/durable/conversations", JSON.stringify(conversations)],
   ];
   for (const [name, path, body] of cases) {
     test(name, async () => {
@@ -190,6 +219,8 @@ describe("a member's key reaches the phone masked through the lead", () => {
     expect(maskForwardedAnswer("files", JSON.stringify(fileText))).toBe(JSON.stringify(maskFileBody(fileText, true)));
     const clearReceipt = { requestId: "clear-req-0001", outcome: "cleared", draft: `export OPENAI_API_KEY=${key}` };
     expect(maskForwardedAnswer("clear", JSON.stringify(clearReceipt))).toBe(JSON.stringify(maskClearReceipt(clearReceipt)));
+    expect(maskForwardedAnswer("reply", JSON.stringify(reply))).toBe(JSON.stringify({ ...reply, send: maskSendAnswer(reply.send) }));
+    expect(maskForwardedAnswer("conversations", JSON.stringify(conversations))).toBe(JSON.stringify({ ...conversations, items: maskConversationRows(conversations.items) }));
   });
 
   test("the phone asked for gzip: the masked bytes are what is compressed", async () => {
@@ -211,6 +242,7 @@ describe("an answer a 1.18 member already masked comes back byte for byte", () =
     ["a Chat window", "/api/pane/w1:p1/chat", JSON.stringify(maskChatBody(chat))],
     ["a Changes diff", "/api/pane/w1:p1/changes", JSON.stringify({ paneId: "w1:p1", ...maskDiff(diff, true) })],
     ["a Files body", "/api/pane/w1:p1/files", JSON.stringify({ paneId: "w1:p1", ...maskFileBody(fileText, true) })],
+    ["a conversation list", "/api/durable/conversations", JSON.stringify({ ...conversations, items: maskConversationRows(conversations.items) })],
   ];
   for (const [name, path, body] of already) {
     test(name, async () => {
@@ -230,6 +262,8 @@ describe("an answer a 1.18 member already masked comes back byte for byte", () =
     expect(maskForwardedAnswer("files", listing)).toBe(listing);
     const changes = '{"paneId":"w1:p1", "available":true, "root":"/r", "repos":[]}';
     expect(maskForwardedAnswer("changes", changes)).toBe(changes);
+    const noHistory = '{"available":false, "reason":"unsupported"}';
+    expect(maskForwardedAnswer("conversations", noHistory)).toBe(noHistory);
   });
 });
 
@@ -281,6 +315,10 @@ describe("fail closed: a body that should be masked and cannot be is never passe
     ["a diff that is not a string", "/api/pane/w1:p1/changes", JSON.stringify({ ...diff, diff: [key] })],
     ["a file text that is not a string", "/api/pane/w1:p1/files", JSON.stringify({ ...fileText, text: { t: key } })],
     ["a Clear's draft that is not a string", "/api/pane/w1:p1/clear", JSON.stringify({ requestId: "clear-req-0001", outcome: "cleared", draft: [key] })],
+    ["a conversation title that is not a string", "/api/durable/conversations", JSON.stringify({ available: true, items: [{ id: "c", title: { t: key } }] })],
+    ["a conversation subtitle that is not a string", "/api/durable/conversations", JSON.stringify({ available: true, items: [{ id: "c", title: "t", subtitle: { s: key } }] })],
+    ["a conversation list whose items are not a list", "/api/durable/conversations", JSON.stringify({ available: true, items: { a: key } })],
+    ["a conversation list with no availability", "/api/durable/conversations", JSON.stringify({ items: conversations.items })],
   ];
   for (const [name, path, body] of broken) {
     test(name, async () => {
@@ -327,6 +365,72 @@ describe("a Clear's receipt through the lead: a draft that holds a secret goes",
   });
 });
 
+// A reply runs the Send Protocol (M56 spec 06), and its answer carries the Surface it read, the ask
+// labels on the screen included. A member masks them by its own switch, and the lead by its own.
+describe("a reply through the lead: the Surface's ask labels are masked", () => {
+  const tap = '{"text":"hi","submit":true,"id":"phone-req-0001"}';
+  const post = (body: string) => viaLead("/api/pane/w1:p1/reply", member(body).transport, { mask: maskForwardedAnswer, body: tap });
+
+  test("a member that does not mask: the phone gets the labels masked and every other field as the member sent it", async () => {
+    const res = await post(JSON.stringify(reply));
+    expect(res.status).toBe(200);
+    const out = await res.text();
+    expect(out).not.toContain(key);
+    const options = [{ id: "1", label: "Yes" }, { id: "2", label: `Yes, and use ${masked}` }];
+    expect(JSON.parse(out)).toEqual({ ...reply, send: { ...reply.send, surface: { ...surface, modal: { ask: { ...ask, options } } } } });
+  });
+
+  test("a keys reply, a refusal before the protocol ran, and an answer that read no screen are the member's own bytes", async () => {
+    // Spacing a re-serialisation would drop: proof the bytes were handed back, not rebuilt.
+    const keys = '{"ok":true}';
+    const old = '{"ok":false, "textDelivered":false, "code":"reply.send_failed"}';
+    const noScreen = '{"ok":true, "send":{"receipt":{"requestId":"phone-req-0001","outcome":"sent"}, "offers":[]}}';
+    for (const body of [keys, old, noScreen]) expect(await (await post(body)).text()).toBe(body);
+  });
+
+  test("a Surface with no dialog on it carries no labels, and goes on as the member sent it", async () => {
+    for (const modal of ["none", "unreadable", "unknown"] as const) {
+      const body = { ...reply, send: { ...reply.send, surface: { ...surface, modal } } };
+      const res = await post(JSON.stringify(body));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual(body);
+    }
+  });
+
+  test("a protocol answer that is not an object, or a Surface the mask cannot walk, is refused, never passed on", async () => {
+    const odd = { ...surface, modal: { ask: { ...ask, options: [{ id: "2", label: { t: key } }] } } };
+    for (const body of [{ ...reply, send: [key] }, { ...reply, send: { ...reply.send, surface: odd } }, { ...reply, send: { ...reply.send, surface: null } }]) {
+      const res = await post(JSON.stringify(body));
+      expect(res.status).toBe(502);
+      const out = await res.text();
+      expect(out).not.toContain(key);
+      expect(out).toContain("answer_unmaskable");
+    }
+  });
+
+  test("the lead's mask off: the member's answer is its own bytes, labels and all", async () => {
+    const body = JSON.stringify(reply);
+    const { transport, seen } = member(body);
+    const res = await viaLead("/api/pane/w1:p1/reply", transport, { mask: undefined, body: tap });
+    expect(seen.pulls).toBe(0);
+    expect(await res.text()).toBe(body);
+  });
+});
+
+describe("a durable program's conversation list through the lead", () => {
+  test("a member that does not mask: the phone gets the list its own route would have masked", async () => {
+    const adapter = { listConversations: async () => muxOk<MuxConversationPage>({ items: [{ id: "conv-1", title: `Ticket ${key}`, subtitle: `about ${key}`, startedAt: "2026-10-13T09:00:00.000Z", state: "open", items: 2 }] }) };
+    const url = new URL("http://member/api/durable/conversations");
+    const answer = async (redact: boolean) => (await durableConversations(adapter, url, new Request(url), redact)).text();
+    const clear = await answer(false);
+    expect(clear).toContain(key);
+    const res = await viaLead("/api/durable/conversations", member(clear).transport);
+    const out = await res.text();
+    expect(out).not.toContain(key);
+    expect(out).toBe(await answer(true));
+  });
+});
+
 describe("the merged snapshot's titles", () => {
   test("a member's program-set title is masked; a label and a masked title are left as they are", () => {
     const snap = {
@@ -337,11 +441,87 @@ describe("the merged snapshot's titles", () => {
       ],
       shellPanes: [{ paneId: "w1:p4", terminalTitle: `curl ${key}` }],
     };
-    const out = maskSnapshotTitles(snap);
+    const out = maskSnapshotPanes(snap);
     expect(out.agents[0]!.terminalTitle).toBe(`vim ${masked}`);
     expect(out.agents[1]!.terminalTitle).toBe(masked);
     expect(out.agents[2]).toEqual(snap.agents[2]!);
     expect(out.shellPanes[0]!.terminalTitle).toBe(`curl ${masked}`);
+  });
+});
+
+// A member's own snapshot masks its panes' screen text by its own switch: the Surface's ask labels,
+// a hook-held permission's input and labels, and the held sends. The lead masks them by its own.
+describe("the merged snapshot's screen text", () => {
+  const hold: HoldNote = { askId: "hold-1", state: "held", tool: "Bash", input: `curl ${key}`, agent: false, options: ["Yes", `use ${key}`, "No"], hash: "0abc12", adopted: true, since: 1 };
+  const heldRow: HeldRow = { requestId: "phone-req-0002", mode: "send", text: `use ${key}`, heldAt: 1, expiresAt: 2, state: "held" };
+  const pane = (over: Partial<PaneWire> & { paneId: string }): PaneWire => ({
+    workspaceId: "w1",
+    workspaceLabel: "collie",
+    workspaceNumber: 1,
+    tabId: "w1:t1",
+    agent: "claude",
+    status: "blocked",
+    cwd: "/home/you",
+    focused: false,
+    kind: "agent",
+    ...over,
+  });
+  /** The lead's `/api/snapshot` with its mask on: its own panes merged with the member's body as it came off the wire, then masked. */
+  const merged = (memberBody: PeerSnapshotWire, own: PaneWire[] = []): SnapshotResponse => {
+    const local: SnapshotResponse = { bridge: "connected", agents: own, shellPanes: [], workspaces: [], tabs: [], sessions: [], notifications: { snoozedUntil: null }, ts: 1 };
+    const body = parsePeerSnapshot(JSON.parse(JSON.stringify(memberBody)));
+    return maskSnapshotPanes(mergeSnapshot(local, { self: { id: "desk", name: "desk" }, peers: [{ state: REACHABLE, name: "laptop", body }], now: 1 }));
+  };
+
+  test("a member that does not mask: its labels, its hold and its held sends reach the phone masked; ids and hashes stay", () => {
+    const shell = pane({ paneId: "w1:p9", agent: "shell", kind: "shell", status: "idle", held: [heldRow] });
+    const out = merged({ sessions: [], agents: [pane({ paneId: "w1:p1", surface, hold, held: [heldRow] })], shellPanes: [shell] });
+    expect(JSON.stringify(out)).not.toContain(key);
+    const agent = out.agents[0]!;
+    expect(agent.surface).toEqual({ ...surface, modal: { ask: { ...ask, options: [{ id: "1", label: "Yes" }, { id: "2", label: `Yes, and use ${masked}` }] } } });
+    expect(agent.hold).toEqual({ ...hold, input: `curl ${masked}`, options: ["Yes", `use ${masked}`, "No"] });
+    expect(agent.held).toEqual([{ ...heldRow, text: `use ${masked}` }]);
+    expect(out.shellPanes[0]!.held).toEqual([{ ...heldRow, text: `use ${masked}` }]);
+  });
+
+  test("the lead's own panes, already masked, are left as they are", () => {
+    const own = maskSnapshotPanes({ agents: [pane({ paneId: "w1:p1", surface, hold, held: [heldRow] })], shellPanes: [] }).agents;
+    const out = merged({ sessions: [], agents: [], shellPanes: [] }, own);
+    expect(out.agents).toEqual(own.map((p) => Object.assign({}, p, { host: "desk" })));
+  });
+
+  test("a Surface with no dialog on it, and a pane with no screen fields, are left as they are", () => {
+    const quiet = [pane({ paneId: "w1:p1", surface: { ...surface, modal: "none" } }), pane({ paneId: "w1:p2" })];
+    const out = merged({ sessions: [], agents: quiet, shellPanes: [] });
+    expect(out.agents).toEqual(quiet.map((p) => Object.assign({}, p, { host: "laptop" })));
+  });
+
+  test("a screen field the mask cannot walk is dropped, never passed on in clear and never thrown on", () => {
+    const unwalkable = [
+      pane({ paneId: "w1:p2" }),
+      { ...pane({ paneId: "w1:p3" }), surface: { ...surface, modal: { ask: { ...ask, options: [{ id: "2", label: { t: key } }] } } }, hold: { ...hold, input: { t: key } }, held: [{ ...heldRow, text: { t: key } }] },
+      { ...pane({ paneId: "w1:p4" }), surface: { ...surface, modal: "a word this build does not know" }, hold: { ...hold, options: `use ${key}` }, held: { text: key } },
+      { ...pane({ paneId: "w1:p5", surface, held: [heldRow] }), hold: { ...hold, options: ["Yes", { t: key }] } },
+      pane({ paneId: "w1:p6", surface, hold, held: [heldRow] }),
+      { ...pane({ paneId: "w1:p7" }), surface: { ...surface, modal: { ask: { ...ask, options: [null] } } }, held: [null] },
+      { ...pane({ paneId: "w1:p8" }), surface: [key] },
+    ];
+    const out = merged({ sessions: [], agents: unwalkable, shellPanes: [] });
+    expect(JSON.stringify(out)).not.toContain(key);
+    for (const id of ["w1:p3", "w1:p4", "w1:p7", "w1:p8"]) {
+      const dropped = out.agents.find((p) => p.paneId === id)!;
+      expect(dropped).not.toHaveProperty("surface");
+      expect(dropped).not.toHaveProperty("hold");
+      expect(dropped).not.toHaveProperty("held");
+    }
+    // Only the field the mask cannot walk goes: the same pane's Surface and held sends stay, masked.
+    const oddHold = out.agents.find((p) => p.paneId === "w1:p5")!;
+    expect(oddHold).not.toHaveProperty("hold");
+    expect(oddHold.held?.[0]?.text).toBe(`use ${masked}`);
+    const kept = out.agents.find((p) => p.paneId === "w1:p6")!;
+    expect(kept.surface?.modal).toEqual({ ask: { ...ask, options: [{ id: "1", label: "Yes" }, { id: "2", label: `Yes, and use ${masked}` }] } });
+    expect(kept.hold?.input).toBe(`curl ${masked}`);
+    expect(kept.held?.[0]?.text).toBe(`use ${masked}`);
   });
 });
 
@@ -362,7 +542,7 @@ describe("a pane's todo list", () => {
       agents: [{ paneId: "w1:p1", todos: [{ id: "1", text: `use ${key}`, status: "pending" as const }] }, { paneId: "w1:p2" }],
       shellPanes: [],
     };
-    const out = maskSnapshotTitles(snap);
+    const out = maskSnapshotPanes(snap);
     expect(out.agents[0]!.todos![0]!.text).toBe(`use ${masked}`);
     expect(out.agents[1]).toEqual({ paneId: "w1:p2" });
   });

@@ -4,7 +4,7 @@ import { readdir, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { maskSnapshotTitles, maskSubagentList } from "./answer-mask.ts";
+import { maskSnapshotPanes, maskSubagentList } from "./answer-mask.ts";
 import { ClaudeTranscriptSource } from "./journal/claude.ts";
 import type { RowReducer } from "./journal/reduce.ts";
 import type { JournalAdapter, TranscriptSource } from "./journal/types.ts";
@@ -381,7 +381,7 @@ describe("the redact mask", () => {
   });
 
   test("a member's snapshot gets its subagents masked on the lead", () => {
-    const out = maskSnapshotTitles({
+    const out = maskSnapshotPanes({
       agents: [{ subagents: [{ description: `use ${key}` }] }, {}],
       shellPanes: [],
     });

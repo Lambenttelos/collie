@@ -1,15 +1,18 @@
 import {
   maskChatBody,
   maskClearReceipt,
+  maskConversationRows,
   maskDiff,
   maskFileBody,
   maskHistoryPage,
   maskPaneRead,
+  maskSendAnswer,
   maskSentAnswer,
 } from "../answer-mask.ts";
 import type { JsonObject, JsonValue } from "../json.ts";
 import type { TranscriptEntry } from "../journal/types.ts";
 import type { ChatBody } from "../journal/live.ts";
+import type { Surface } from "../../web/src/lib/surface/surface.ts";
 import type { ChangeDiff, FileReadAnswer, PaneReadResponse } from "../types.ts";
 import type { AnswerMask, TextAnswer } from "./forward.ts";
 
@@ -74,6 +77,20 @@ function maskBody(answer: TextAnswer, body: JsonObject, raw: string): string | n
       return isFileText(body) ? JSON.stringify(maskFileBody(body, true)) : null;
     case "sent":
       return isSentAnswer(body) ? JSON.stringify(maskSentAnswer(body)) : null;
+    case "conversations":
+      if (body.available === false) return raw;
+      return body.available === true && isConversationList(body)
+        ? JSON.stringify({ ...body, items: maskConversationRows(body.items) })
+        : null;
+    case "reply": {
+      // A keys reply, and a refusal before the Send Protocol ran, carry no protocol answer; an answer
+      // that read no screen carries no Surface. Neither has screen text to mask.
+      if (!("send" in body)) return raw;
+      const send = body.send;
+      if (!isObject(send)) return null;
+      if (!("surface" in send)) return raw;
+      return isSendWithSurface(send) ? JSON.stringify({ ...body, send: maskSendAnswer(send) }) : null;
+    }
     case "clear":
       // A refusal, and a receipt for a box that held no text, carry nothing to mask.
       if (!("draft" in body)) return raw;
@@ -84,6 +101,44 @@ function maskBody(answer: TextAnswer, body: JsonObject, raw: string): string | n
 /** A Sent answer (ADR 0107) as deep as its mask reads it: an `entries` list whose every `line` is a string. */
 function isSentAnswer(body: JsonObject): body is JsonObject & { entries: { line: string }[] } {
   return Array.isArray(body.entries) && body.entries.every((entry) => isObject(entry) && typeof entry.line === "string");
+}
+
+/** A durable program's conversation list (M53 spec 11) as deep as its mask reads it: every title a string, and every subtitle a row has. */
+function isConversationList(body: JsonObject): body is JsonObject & { items: { title: string; subtitle?: string }[] } {
+  return (
+    Array.isArray(body.items) &&
+    body.items.every((row) => isObject(row) && typeof row.title === "string" && (row.subtitle === undefined || typeof row.subtitle === "string"))
+  );
+}
+
+/** A reply's Send Protocol answer (M56 spec 06) as deep as its mask reads it: a Surface the mask can walk. */
+function isSendWithSurface(send: JsonObject): send is JsonObject & { surface: Surface } {
+  return isWalkableSurface(send.surface);
+}
+
+// ── A MEMBER PANE'S SCREEN TEXT ──────────────────────────────────────────────
+// What `maskSurface`, `maskHoldNote` and `maskHeldRows` walk, checked as deep as they walk it. A reply's
+// Surface is checked here, and so is each pane's `surface`, `hold` and `held` when the lead parses a
+// member's snapshot (`bridge/crew/merge.ts`), so a member one release ahead that changed one of their
+// shapes never has it passed over in clear, nor thrown on.
+
+/** A Surface (M56 spec 04): a modal word, or an ask whose every option label is a string. */
+export function isWalkableSurface(value: JsonValue | undefined): value is JsonObject & Surface {
+  if (!isObject(value)) return false;
+  const modal = value.modal;
+  if (modal === "none" || modal === "unreadable" || modal === "unknown") return true;
+  const ask = isObject(modal) ? modal.ask : undefined;
+  return isObject(ask) && Array.isArray(ask.options) && ask.options.every((option) => isObject(option) && typeof option.label === "string");
+}
+
+/** A hook-held permission's note (M56 spec 12): an input string and a list of label strings. */
+export function isWalkableHold(value: JsonValue | undefined): boolean {
+  return isObject(value) && typeof value.input === "string" && Array.isArray(value.options) && value.options.every((label) => typeof label === "string");
+}
+
+/** A pane's held sends (M56 spec 15): a list of rows whose every text is a string. */
+export function isWalkableHeld(value: JsonValue | undefined): boolean {
+  return Array.isArray(value) && value.every((row) => isObject(row) && typeof row.text === "string");
 }
 
 /** A Clear's receipt (ADR 0116) as deep as its mask reads it: a `draft` string. */

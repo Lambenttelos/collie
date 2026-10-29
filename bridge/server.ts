@@ -170,11 +170,15 @@ import { REQUEST_ID, RETURNED_CARD_DROPPED, reservedLead, SEND_MODES, SEND_WHENS
 import {
   maskChatBody,
   maskClearReceipt,
+  maskConversationRows,
   maskDiff,
   maskFileBody,
+  maskHeldRows,
   maskHistoryPage,
+  maskHoldNote,
   maskPaneRead,
-  maskSnapshotTitles,
+  maskSendAnswer,
+  maskSnapshotPanes,
   maskTerminalTitle,
   maskSubagentList,
   maskTodoList,
@@ -1693,12 +1697,12 @@ export function startServer(opts: {
       // pane (M56 spec 14) takes its asks from its driver, so it never carries a hold.
       const note = surface === undefined || from.driver !== undefined ? null : (from.hold?.(wire.paneId) ?? null);
       // The option labels are screen text too. The hash stays: the hold card's tap carries it.
-      const withHold = note === null ? stoppable : { ...stoppable, hold: cfg.redact ? { ...note, input: redactText(note.input), options: note.options.map(redactText) } : note };
+      const withHold = note === null ? stoppable : { ...stoppable, hold: cfg.redact ? maskHoldNote(note) : note };
       if (from.send === undefined && from.driver === undefined) return withHold;
       // The pane's held sends (M56 spec 15), only when there is one; the text takes the mirror's mask.
       // A held send is the send queue's, a hold is a permission's (spec 12): both may stand at once.
       const held = from.send?.heldOf(from.name, wire.paneId) ?? [];
-      const shown = cfg.redact ? held.map((row) => ({ ...row, text: redactText(row.text) })) : held;
+      const shown = cfg.redact ? maskHeldRows(held) : held;
       // M69: a pane the phone may steer says so (paneCanSteer).
       const marked: PaneWire = paneCanSteer(from, wire.paneId) ? { ...withHold, sendProtocol: true as const, canSteer: true as const } : { ...withHold, sendProtocol: true as const };
       return held.length === 0 ? marked : { ...marked, held: shown };
@@ -2717,11 +2721,12 @@ export function startServer(opts: {
         // peer's ETag is never recomputed here, because no peer body is re-hashed on this path.
         // Tag every snapshot poll with the on-disk build id so an open client notices a live rebuild
         // between polls — the no-service-worker self-update path (web/src/lib/self-update.ts).
-        // A member's panes arrive as the member sent them, and one release behind it sent each
-        // program-set title in clear, so the lead masks the merged titles by its own switch. Its own
-        // titles are already masked, and the mask leaves a masked title as it is.
+        // A member's panes arrive as the member sent them, and one release behind, or with its own mask
+        // off, it sent each program-set title and each pane's screen text in clear, so the lead masks
+        // them in the merged body by its own switch. Its own are already masked, and the mask leaves a
+        // masked field as it is.
         const merged = crewLead ? crewLead.merge(body, plan) : body;
-        const out = crewLead && cfg.redact ? maskSnapshotTitles(merged) : merged;
+        const out = crewLead && cfg.redact ? maskSnapshotPanes(merged) : merged;
         return withBuildHeader(json(out, req.headers.get("accept-encoding")), await buildId());
       }
 
@@ -4364,11 +4369,7 @@ export async function durableConversations(
     return json({ available: false, reason, detail: read.detail } satisfies DurableConversationsResponse, accept);
   }
   // A title and a subtitle are the program's words, masked like a pane's title (bridge/redact.ts).
-  const items = read.value.items.map((row): DurableConversationRow => {
-    const out: DurableConversationRow = { ...row, title: redact ? redactText(row.title) : row.title };
-    if (row.subtitle !== undefined) out.subtitle = redact ? redactText(row.subtitle) : row.subtitle;
-    return out;
-  });
+  const items: DurableConversationRow[] = redact ? maskConversationRows(read.value.items) : [...read.value.items];
   const body: DurableConversationsResponse = read.value.next === undefined ? { available: true, items } : { available: true, items, next: read.value.next };
   return json(body, accept);
 }
@@ -5176,7 +5177,7 @@ export async function replyThroughProtocol(
     auditDetail.probed = receipt.keys.includes("probe");
   }
   context.audit.record({ action: "reply", paneId, session, device: context.device, detail: auditDetail });
-  const shown: SendAnswer = context.redact && answer.surface !== undefined ? { ...answer, surface: maskSurface(answer.surface) } : answer;
+  const shown: SendAnswer = context.redact ? maskSendAnswer(answer) : answer;
   const outcome = receipt?.outcome;
   // A held send (M56 spec 15) is taken: Collie sends it when the turn ends.
   if (outcome === undefined || outcome === "sent" || outcome === "effective" || outcome === "steered" || outcome === "discarded" || outcome === "held") return json({ ok: true, send: shown } satisfies ReplyProtocolResponse, context.acceptEncoding);

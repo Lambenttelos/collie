@@ -424,8 +424,11 @@ time a pane shows masked text, a short line on the phone says so, once per devic
 masked text into a reply, a caution under the box says the pane gets the dots, not the secret.
 
 In a crew, each member masks its own text, and the lead masks it again before your phone gets it.
-The lead masks a member's mirror, Chat, History, diffs, file text and pane titles with the same mask
-it uses for its own, so a member that still runs 1.17.x cannot send a key to your phone in clear.
+The lead masks a member's mirror, Chat, History, diffs, file text, Sent lines, durable conversation
+titles, and in the pane list its pane titles, tasks, subagents, dialog options, held permissions and
+held sends, with the same mask it uses for its own. It masks the dialog options a reply answers with
+too, and leaves out a Clear's saved text when that text holds a secret, as it does for its own panes.
+So a member that still runs 1.17.x, or has its own mask off, cannot send a key to your phone in clear.
 Masked text stays as it is when it is masked again. Text reaches the phone unmasked only when
 `COLLIE_REDACT=off` is set on both the lead and the member. One edge: a member on 1.17.x masks
 nothing itself, so when a secret sits in the lines a reply is checked against, the phone may refuse

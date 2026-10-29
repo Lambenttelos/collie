@@ -27,11 +27,12 @@ import { HOST_PARAM, type PeerState } from "./registry.ts";
 // release behind does not, and the phone must not get a key in clear because of a member's version.
 // So the text answers are masked again on the lead, with the injected {@link AnswerMask} (the same
 // functions the local routes use, through `bridge/crew/mask.ts`): the mirror, History, Chat, a
-// Changes diff, a Files body, Sent's lines and a Clear's receipt ({@link textAnswerOf}). The lead
-// masks by its own switch whatever the member's, so a member with its mask off is covered too. The
-// mask is idempotent, so an answer a member already masked comes back byte for byte. Every other
-// route, a picture and a blob included, still streams unread. An answer that should be masked and
-// cannot be read is refused, never passed on raw.
+// Changes diff, a Files body, Sent's lines, a durable program's conversation list, a reply's Surface
+// and a Clear's receipt ({@link textAnswerOf}). The lead masks by its own switch whatever the
+// member's, so a member with its mask off is covered too. The mask is idempotent, so an answer a
+// member already masked comes back byte for byte. Every other route, a picture and a blob included,
+// still streams unread. An answer that should be masked and cannot be read is refused, never passed
+// on raw.
 //
 // ── AND THE ONE THING IT REFUSES TO GUESS ────────────────────────────────────
 // §10.3: an attempted write whose outcome is unknown is SURFACED, never retried and never reported
@@ -148,11 +149,12 @@ const FORWARDABLE: readonly RegExp[] = [
 /**
  * The answers that carry text a pane or an agent wrote, which the lead masks before the phone reads
  * them (§9.1): the mirror (`pane`), a History page, a Chat body, and a Changes or Files answer, asked
- * by pane or by space. A picture (`files/image`) and a blob are bytes, never text, and stay byte for
- * byte, and so does every write's answer but a Clear's receipt (`clear`), which carries the box's
- * text for Restore.
+ * by pane or by space, Sent's lines and a durable program's conversation list. A picture
+ * (`files/image`) and a blob are bytes, never text, and stay byte for byte, and so does every write's
+ * answer but two: a reply's (`reply`), whose Send Protocol answer carries the screen's ask labels, and
+ * a Clear's receipt (`clear`), which carries the box's text for Restore.
  */
-export type TextAnswer = "pane" | "history" | "chat" | "changes" | "files" | "sent" | "clear";
+export type TextAnswer = "pane" | "history" | "chat" | "changes" | "files" | "sent" | "conversations" | "reply" | "clear";
 
 /** Which {@link TextAnswer} a crew route answers with, or `null` for a route whose answer is not text. */
 export function textAnswerOf(route: string): TextAnswer | null {
@@ -163,8 +165,13 @@ export function textAnswerOf(route: string): TextAnswer | null {
   if (/^(?:pane|workspace)\/[^/]+\/files$/.test(route)) return "files";
   // The items of a durable conversation are History's own shape (`entries`), masked the same way.
   if (/^durable\/conversation\/[^/]+\/items$/.test(route)) return "history";
+  // The list's titles and subtitles are the program's words, masked like a pane's title.
+  if (route === "durable/conversations") return "conversations";
   // Sent's lines are what a person typed (ADR 0107): masked again on the lead, as every other text.
   if (route === "sent") return "sent";
+  // A reply's Send Protocol answer (M56 spec 06) carries the Surface it read, the ask labels on the
+  // screen included: masked as the member's own route masks them.
+  if (/^pane\/[^/]+\/reply$/.test(route)) return "reply";
   // A Clear's receipt carries the box's text for Restore (ADR 0116): the lead drops a draft that holds
   // a secret, as its own route does.
   if (/^pane\/[^/]+\/clear$/.test(route)) return "clear";

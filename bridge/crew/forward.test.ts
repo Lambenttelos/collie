@@ -315,7 +315,7 @@ describe("which routes cross a link", () => {
     expect(crewRouteFor("/api/pane/x/walky/y")).toBeNull();
   });
 
-  test("history: the program's list and items are reads, a reopen is a write audited as durable.reopen, and the items are masked as History", () => {
+  test("history: the program's list and items are reads, a reopen is a write audited as durable.reopen, the list is masked as the program's words and the items as History", () => {
     expect(forwardKind("durable/conversations")).toBe("read");
     expect(forwardKind("durable/conversation/c1/items")).toBe("read");
     expect(forwardKind("durable/conversation/c1/reopen")).toBe("write");
@@ -323,7 +323,7 @@ describe("which routes cross a link", () => {
     expect(forwardAuditAction("durable/conversation/c1/items")).toBeNull();
     expect(forwardAuditAction("durable/conversation/c1/reopen")).toBe("durable.reopen");
     expect(textAnswerOf("durable/conversation/c1/items")).toBe("history");
-    expect(textAnswerOf("durable/conversations")).toBeNull();
+    expect(textAnswerOf("durable/conversations")).toBe("conversations");
     expect(forwardPaneId("durable/conversation/c1/reopen")).toBeUndefined();
   });
 

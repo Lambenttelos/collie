@@ -21,6 +21,9 @@ import { KeyGate } from "./key-gate.ts";
 import { RowRing, SendProtocol, SessionLocks, type SendRequest } from "./protocol.ts";
 import { RequestStore } from "./requests.ts";
 import { HoldStore } from "./holds.ts";
+import { forwardToPeer, type ForwardTransport } from "../crew/forward.ts";
+import { maskForwardedAnswer } from "../crew/mask.ts";
+import { DEFAULT_MAX_UPLOAD_BYTES } from "../uploads.ts";
 
 const RULE = "─".repeat(40);
 
@@ -349,6 +352,75 @@ describe("the reply route runs the protocol (M56 spec 06)", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// A reply's answer carries the Surface the protocol read, so on a dialog screen it carries the
+// dialog's option labels: rows of the screen. A member masks them by its own switch; a lead with its
+// mask on masks a member's the same way whatever the member's switch (CREW_PROTOCOL.md §9.1).
+describe("a reply on a dialog screen, through a crew lead", () => {
+  // A placeholder key, as bridge/redact.test.ts writes one: the mask must hide it, and it is no secret.
+  const KEY = `sk-test-placeholder-${"0".repeat(40)}`;
+  const DIALOG = readFileSync(join(import.meta.dir, "..", "..", "web", "src", "fixtures", "panes", "claude--permission-bash.txt"), "utf8").replace(
+    "Yes, and don’t ask again for: mkfifo fixture-fifo *",
+    `Yes, and use ${KEY}`,
+  );
+
+  /** The member's answer to a text reply on that screen, with its mask on or off: a fresh protocol each time. */
+  async function memberAnswer(redact: boolean): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "collie-route-"));
+    try {
+      const pane = {
+        readGrid: (paneId: string): Promise<MuxOutcome<MuxGrid>> => Promise.resolve(muxOk({ paneId, text: DIALOG, truncated: false, revision: 0 })),
+        typeText: (): Promise<MuxAck> => Promise.resolve(muxAck()),
+        writeKeys: (): Promise<MuxAck> => Promise.resolve(muxAck()),
+      };
+      let clock = 0;
+      const send = new SendProtocol({
+        mux: pane,
+        gate: new KeyGate(pane, () => clock),
+        store: new RequestStore(join(dir, "sends"), () => clock),
+        locks: new SessionLocks(),
+        ring: new RowRing(),
+        asks: new AskBook(() => clock, "route-salt"),
+        profile: (harness) => Promise.resolve(profileFor(harness, "2.1.200", { log: () => undefined })),
+        generation: () => "gen",
+        now: () => clock,
+        sleep: (ms) => {
+          clock += ms;
+          return Promise.resolve();
+        },
+      });
+      const engine = { current: () => ({ agents: [{ paneId: "%1", agent: "claude" }], shellPanes: [] }), noteInput: () => undefined, pokeNow: () => undefined };
+      const rt: SendRouteRuntime = { send, engine, herdr: {}, name: "main" };
+      const context = { audit: auditLines().audit, device: "phone", redact, acceptEncoding: null };
+      return await (await replyThroughProtocol(replySendOf(rt), "%1", "main", { text: "hi", submit: true, id: "phone-req-0001" }, context)).text();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("a member with its mask off answers the labels in clear, and the phone gets them through the lead as the member's own mask gives them", async () => {
+    const clear = await memberAnswer(false);
+    expect(clear).toContain(KEY);
+    const transport: ForwardTransport = async () => ({ ok: true, value: new Response(clear, { headers: { "content-type": "application/json" } }), status: 200, member: "laptop", receivedAt: 1, date: null });
+    const url = new URL("https://lead.example/api/pane/%251/reply?host=laptop");
+    const res = await forwardToPeer(new Request(url, { method: "POST", body: '{"text":"hi","submit":true,"id":"phone-req-0001"}' }), url, {
+      link: { memberId: "laptop", address: "laptop.example:8787" },
+      state: { memberId: "laptop", health: "reachable", lastSeenAt: 1, reason: null, version: "1.25.0", conflict: null, preflight: null },
+      maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
+      transport,
+      mask: maskForwardedAnswer,
+    });
+    const out = await res.text();
+    expect(out).not.toContain(KEY);
+    // The Surface is the member's own masked one; every other field is the member's answer as it came.
+    // SAFETY: each is the reply route's JSON answer; `send.surface` is compared, and the rest whole.
+    const parse = (body: string) => JSON.parse(body) as { send: { surface: unknown } };
+    const phone = parse(out);
+    const sent = parse(clear);
+    expect(phone.send.surface).toEqual(parse(await memberAnswer(true)).send.surface);
+    expect({ ...phone, send: { ...phone.send, surface: sent.send.surface } }).toEqual(sent);
   });
 });
 

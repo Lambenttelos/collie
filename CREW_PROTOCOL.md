@@ -249,7 +249,7 @@ the same handlers. There is no second handler set, no second semantic, and no He
 | `GET` | `/crew/v1/workspace/:id/files` | `GET …/workspace/:id/files` | proxied byte-for-byte — additive-optional (§7.1), added 2026-10-05 (M45/03). The same Files view asked by workspace, with the same query, gate and 404 reading as the pane row above |
 | `GET` | `/crew/v1/pane/:id/files/image` | `GET …/files/image` | proxied byte-for-byte — additive-optional (§7.1), added 2026-10-07 (ADR 0090). One picture (`?path=`) under the same root as the pane's Files read, as its own bytes, off **the member's own disk**; the member reads the type off the bytes (PNG, JPEG, GIF, WebP, AVIF) and answers `413` past 16 MiB and `415` for anything else. The same gate as the Files read (§12, `crewGate`'s write branch), a READ for forwarding, audited on neither side. The lead does not relay the member's cache or security headers: it sets `no-store`, `default-src 'none'; sandbox` and `inline` itself on whatever comes back. It does relay the plain-data `X-Collie-File-Size` and `X-Collie-File-Mtime` the member sends, the picture's version, so the phone can hold the picture in memory; a member that sends neither gets neither. A peer that predates it answers **404**, which the phone reads as "no picture" and shows the file's size instead |
 | `GET` | `/crew/v1/workspace/:id/files/image` | `GET …/workspace/:id/files/image` | proxied byte-for-byte — additive-optional (§7.1), added 2026-10-07 (ADR 0090). The same picture asked by workspace, with the same query, gate, statuses and headers as the pane row above |
-| `POST` | `/crew/v1/pane/:id/reply` | `POST …/reply` (`:279`) | forwarded. Two refusals of a text submit (`submit` true or absent, non-empty `text`), added 2026-10-16 (M56 compat), both a 200 with `ok: false`, `textDelivered: false` and `code: "reply.send_failed"`, and both before any read or key. The lead refuses it, without a peer call, when the member's last `hello` carried no `surfaceVersion` (§5), because that older build types blind and answers a bare `ok`. Since 2026-10-17 the lead's refusal also carries `send`, a Send Protocol answer the phone reads (`receipt.outcome: "refused"`, the phone's `requestId` when the body named one, `offers: ["keys"]` and a `detail` sentence), and the lead writes its own audit line for it (`action: "reply"`, `forwarded: "old_member"`). A member refuses it when the body names no `id`, because only a phone that predates the Send Protocol omits it and it never sends the `rowsHash` the second tap needs. Keys and `submit: false` text are untouched |
+| `POST` | `/crew/v1/pane/:id/reply` | `POST …/reply` (`:279`) | forwarded. Two refusals of a text submit (`submit` true or absent, non-empty `text`), added 2026-10-16 (M56 compat), both a 200 with `ok: false`, `textDelivered: false` and `code: "reply.send_failed"`, and both before any read or key. The lead refuses it, without a peer call, when the member's last `hello` carried no `surfaceVersion` (§5), because that older build types blind and answers a bare `ok`. Since 2026-10-17 the lead's refusal also carries `send`, a Send Protocol answer the phone reads (`receipt.outcome: "refused"`, the phone's `requestId` when the body named one, `offers: ["keys"]` and a `detail` sentence), and the lead writes its own audit line for it (`action: "reply"`, `forwarded: "old_member"`). A member refuses it when the body names no `id`, because only a phone that predates the Send Protocol omits it and it never sends the `rowsHash` the second tap needs. Keys and `submit: false` text are untouched. A member's answer to a text submit carries `send`, its Send Protocol answer, with the `surface` it read when it read the screen; a lead with its mask on masks that Surface's ask labels before the phone reads them (§9.1, added 2026-10-29) |
 | `POST` | `/crew/v1/pane/:id/keys` | `POST …/keys` (`:280`) | forwarded |
 | `POST` | `/crew/v1/pane/:id/upload` | `POST …/upload` (`:281`) | forwarded (§13) |
 | `POST` | `/crew/v1/pane/:id/close` | `POST …/close` (`:282`) | forwarded |
@@ -263,7 +263,7 @@ the same handlers. There is no second handler set, no second semantic, and no He
 | `POST` | `/crew/v1/tab` | `POST /api/tab` (`:218`) | forwarded |
 | `POST` | `/crew/v1/tab/:id/rename\|close` | `TAB_ACTION_ROUTE` (`:102`, matched `:234`) | forwarded |
 | `POST` | `/crew/v1/space/:id/rename` | `POST /api/space/:id/rename` (`SPACE_ACTION_ROUTE`) | forwarded, additive-optional (§7.1), added 2026-10-13 (M53 spec 05). Renames a space on a durable agent that declares `renameSpace`; a member that predates it answers 404. |
-| `GET` | `/crew/v1/durable/conversations` | `GET /api/durable/conversations` (`DURABLE_CONVERSATIONS_ROUTE`) | proxied byte-for-byte, additive-optional (§7.1), added 2026-10-13 (M53 spec 11). The conversation list of the durable agent **the member runs**, open and closed, with the phone's `after` and `limit` riding through. A READ: attempted against a stale member, read budget, audited on neither side. A member whose adapter has no durable agent history answers `{ available: false, reason: "unsupported" }`, and a peer that predates it answers 404, which the phone shows as a list it could not load |
+| `GET` | `/crew/v1/durable/conversations` | `GET /api/durable/conversations` (`DURABLE_CONVERSATIONS_ROUTE`) | proxied, additive-optional (§7.1), added 2026-10-13 (M53 spec 11). The conversation list of the durable agent **the member runs**, open and closed, with the phone's `after` and `limit` riding through. A READ: attempted against a stale member, read budget, audited on neither side. A member whose adapter has no durable agent history answers `{ available: false, reason: "unsupported" }`, and a peer that predates it answers 404, which the phone shows as a list it could not load. The lead masks each row's `title` and `subtitle` again before the phone reads them (§9.1, added 2026-10-29) |
 | `GET` | `/crew/v1/durable/conversation/:id/items` | `GET /api/durable/conversation/:id/items` (`DURABLE_CONVERSATION_ROUTE`) | proxied, additive-optional (§7.1), added 2026-10-13 (M53 spec 11). One conversation's items, read from the member's durable agent and never from its log, as History `entries`. A READ like the row above, and the lead masks it again as a History answer (§9.1) |
 | `POST` | `/crew/v1/durable/conversation/:id/reopen` | `POST /api/durable/conversation/:id/reopen` (`DURABLE_CONVERSATION_ROUTE`) | forwarded, additive-optional (§7.1), added 2026-10-13 (M53 spec 11). Asks the member's durable agent to show a closed conversation again. A WRITE: refused before it is attempted when the member is not taking writes (§10.3) and by the member's own device gate (§12); audited as `durable.reopen` on both sides. A peer that predates it answers 404, which the phone reads as a refusal |
 | `POST` | `/crew/v1/workspace` | `POST /api/workspace` (`:225`) | forwarded |
@@ -1253,12 +1253,15 @@ version.
 
 **The lead masks a member's text** *(added 2026-10-08, 1.18.0)*. Every collie masks known secret
 shapes in the text it sends a phone (`bridge/redact.ts`, `COLLIE_REDACT`, on by default), and a
-member does so for its own answers. A member one release behind does not, so a lead with the mask on
-masks five answers again before the phone reads them: the mirror (`pane/:id`), `history`, `chat`,
-and `changes` and `files`, asked by pane or by workspace. It uses the functions its own routes use
-for the same answers (`bridge/answer-mask.ts`, through `bridge/crew/mask.ts`), so a member's answer
-is masked exactly as the lead's own would be, whatever the member's version. Nothing changes on the
-peer surface, and `CREW_PROTOCOL_VERSION` does not move.
+member does so for its own answers. A member one release behind does not, nor does one with its own
+mask off, so a lead with the mask on masks nine answers again before the phone reads them: the
+mirror (`pane/:id`), `history` (and a durable conversation's `items`, which are History's shape),
+`chat`, `changes` and `files`, asked by pane or by workspace, Sent's lines (`sent`), the durable
+conversation list (`durable/conversations`), a reply's Send Protocol answer (`pane/:id/reply`) and a
+Clear's receipt (`pane/:id/clear`). It uses the functions its own routes use for the same answers
+(`bridge/answer-mask.ts`, through `bridge/crew/mask.ts`), so a member's answer is masked exactly as
+the lead's own would be, whatever the member's version. Nothing changes on the peer surface, and
+`CREW_PROTOCOL_VERSION` does not move.
 
 - **Only a `2xx` with a body is read.** A `304` has none, and an error answer carries no session text
   on either side, so both stream on as themselves. Every other route, `files/image` and `blobs`
@@ -1287,14 +1290,29 @@ peer surface, and `CREW_PROTOCOL_VERSION` does not move.
   History page (measured 2026-10-08), then compressed for the phone as above.
 - **Either switch masks.** The lead masks by its own `COLLIE_REDACT`, and the member by its own. Text
   reaches the phone in clear only when both are off.
-- **The merged snapshot masks its titles too.** A pane's program-set `terminalTitle` is masked in the
-  lead's own snapshot, so the lead masks it on its members' panes in the merged body (§9.2) as well.
+- **The merged snapshot masks its panes' words and screen text too.** A pane's program-set
+  `terminalTitle`, its todo list and its subagents' descriptions are masked in the lead's own
+  snapshot, and so are its Surface's ask labels (`surface`), its hook-held permission's input and
+  option labels (`hold`) and its held sends' text (`held`), so the lead masks all of them on its
+  members' panes in the merged body (§9.2) as well *(the screen text added 2026-10-29)*. A member's
+  `surface`, `hold` or `held` the mask cannot walk is dropped from its pane when the lead parses the
+  member's snapshot (`parsePeerSnapshot`), as a bad `instance` is: never passed on in clear, and never
+  a failed snapshot, since one member's pane must not cost the phone the whole list (§10.2).
 - **A Clear's receipt loses a draft that holds a secret** *(added 2026-10-29)*. A `cleared` receipt
   (`pane/:id/clear`, ADR 0116) carries the box's text as `draft`, and the phone's Restore types it
   back, so a masked draft would type the mask. The lead drops `draft` whole when its mask would
   change it, as its own route does (`maskClearReceipt` in `bridge/answer-mask.ts`). A draft with
   nothing to mask is passed on, and a refusal or a receipt with no draft is the member's own bytes.
-  It is the one write whose answer the lead reads.
+- **A reply's Surface is masked** *(added 2026-10-29)*. A reply that runs the Send Protocol
+  (`pane/:id/reply`, M56 spec 06) answers with the Surface it read under `send.surface`, and on a
+  dialog that Surface's ask carries the option labels, which are rows of the screen. The lead masks
+  them as its own route does (`maskSendAnswer`). A keys reply, a refusal before the protocol ran and
+  an answer with no Surface are the member's own bytes. With the Clear, it is one of the two writes
+  whose answer the lead reads.
+- **A durable program's conversation list is masked** *(added 2026-10-29)*. Each row's `title` and
+  `subtitle` (`durable/conversations`, M53 spec 11) are the program's words, masked like a pane's
+  title, as the member's own route masks them (`maskConversationRows`). `available: false` is the
+  member's own bytes.
 
 A prompt answer bound to the mirror (`expected`, `verifyPromptBinding` in `bridge/server.ts`) is
 read off the masked text, and a member compares it with its own mask applied. A member that does not mask therefore refuses such a send as

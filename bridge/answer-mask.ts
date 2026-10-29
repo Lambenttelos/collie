@@ -1,11 +1,12 @@
 // ── ONE MASK PER ANSWER, WHICHEVER BRIDGE MADE THE ANSWER ───────────────────────────────────────
 // The answers that carry text a pane or an agent wrote, each with the mask `bridge/redact.ts` puts on
 // it before a phone reads it: the mirror, a History page, a Chat body, a Changes diff, a Files body,
-// a pane's program-set title in the snapshot, and a Clear's receipt. Two callers use them and must
-// agree to the byte: this bridge's own routes (server.ts), when the answer is made here, and a crew
-// lead re-masking what a member sent (`bridge/crew/mask.ts`), because a member one release behind,
-// or with its own mask off, sent it unmasked. One function per answer, so the two cannot drift: a
-// field masked here is masked on both paths.
+// a pane's words and screen text in the snapshot, a reply's Surface, a durable program's conversation
+// list, and a Clear's receipt. Two callers use them and must agree to the byte: this bridge's own
+// routes (server.ts), when the answer is made here, and a crew lead re-masking what a member sent
+// (`bridge/crew/mask.ts`), because a member one release behind, or with its own mask off, sent it
+// unmasked. One function per answer, so the two cannot drift: a field masked here is masked on both
+// paths.
 //
 // Every mask is the same width as what it hides, and the mask character matches no pattern, so
 // running one of these over its own output changes nothing. That is what lets a lead mask a member's
@@ -15,10 +16,12 @@
 //
 // Pure: no disk, no clock, no config. The `COLLIE_REDACT` switch is the caller's.
 
+import type { Surface } from "../web/src/lib/surface/surface.ts";
 import type { ChangeCommitDiff, ChangeDiff, FileReadAnswer, FilesListing, PaneReadResponse } from "./types.ts";
 import { redactEntry } from "./journal/text.ts";
 import type { TranscriptEntry } from "./journal/types.ts";
 import { redactAnsi, redactText } from "./redact.ts";
+import { maskSurface } from "./surface/shadow.ts";
 
 /**
  * A mirror read with its text masked. The grid keeps its escapes and its columns (`redactAnsi`), and
@@ -91,32 +94,77 @@ export function maskSubagentList<T extends { description: string; agentId?: stri
   });
 }
 
-/** The pane fields an agent or a program wrote, which the mask reaches. */
+/**
+ * A hook-held permission's note (M56 spec 12) with its screen text masked: the input shown, which is a
+ * command line, and the option labels. The hash stays: the hold card's tap carries it.
+ */
+export function maskHoldNote<H extends { input: string; options: readonly string[] }>(note: H): H {
+  return { ...note, input: redactText(note.input), options: note.options.map(redactText) };
+}
+
+/** A pane's held sends (M56 spec 15) with their text masked. Ids, times and states are the bridge's own. */
+export function maskHeldRows<R extends { text: string }>(rows: readonly R[]): R[] {
+  return rows.map((row) => ({ ...row, text: redactText(row.text) }));
+}
+
+/**
+ * A Send Protocol answer (M56 spec 06), as a reply carries it, with its Surface's ask labels masked
+ * ({@link maskSurface}). The rest of it is the protocol's own words and the hash of the rows.
+ */
+export function maskSendAnswer<A extends { surface?: Surface }>(answer: A): A {
+  return answer.surface === undefined ? answer : { ...answer, surface: maskSurface(answer.surface) };
+}
+
+/**
+ * A durable program's conversation rows (M53 spec 11) with each title and subtitle masked: they are
+ * the program's words, as a pane's title is. Ids, states, counts and times are untouched.
+ */
+export function maskConversationRows<R extends { title: string; subtitle?: string }>(rows: readonly R[]): R[] {
+  return rows.map((row) => {
+    const masked = { ...row, title: redactText(row.title) };
+    if (row.subtitle !== undefined) masked.subtitle = redactText(row.subtitle);
+    return masked;
+  });
+}
+
+/** The pane fields an agent, a program or the screen wrote, which the mask reaches. */
 interface PaneWords {
   terminalTitle?: string;
   todos?: readonly { text: string; activeForm?: string }[];
   subagents?: readonly { description: string }[];
-}
-
-/** A pane with its program-set title, its todo list and its subagents masked, whichever it carries. */
-function maskPaneWords<P extends PaneWords>(pane: P): P {
-  const titled = maskTerminalTitle(pane);
-  const listed = titled.todos === undefined ? titled : { ...titled, todos: maskTodoList(titled.todos) };
-  return listed.subagents === undefined ? listed : { ...listed, subagents: maskSubagentList(listed.subagents) };
+  surface?: Surface;
+  hold?: { readonly input: string; readonly options: readonly string[] };
+  held?: readonly { readonly text: string }[];
 }
 
 /**
- * A snapshot with every pane's program-set title, todo list and subagents masked. The lead's merged
+ * A pane with its program-set title, its todo list, its subagents and its screen text masked,
+ * whichever it carries. The screen text is the Surface's ask labels, the hold note and the held
+ * sends, each with the function the pane's own bridge masks it with. A member's pane reaches this
+ * already parsed (`bridge/crew/merge.ts` drops a screen field of a shape the mask cannot walk).
+ */
+function maskPaneWords<P extends PaneWords>(pane: P): P {
+  const titled = maskTerminalTitle(pane);
+  const listed = titled.todos === undefined ? titled : { ...titled, todos: maskTodoList(titled.todos) };
+  const worded = listed.subagents === undefined ? listed : { ...listed, subagents: maskSubagentList(listed.subagents) };
+  const surfaced = worded.surface === undefined ? worded : { ...worded, surface: maskSurface(worded.surface) };
+  const holding = surfaced.hold === undefined ? surfaced : { ...surfaced, hold: maskHoldNote(surfaced.hold) };
+  return holding.held === undefined ? holding : { ...holding, held: maskHeldRows(holding.held) };
+}
+
+/**
+ * A snapshot with every pane's words and screen text masked: the program-set title, the todo list,
+ * the subagents, the Surface's ask labels, the hold note and the held sends. The lead's merged
  * snapshot carries its members' panes as the members sent them, so a member that does not mask sent
  * them in clear.
  */
-export function maskSnapshotTitles<
+export function maskSnapshotPanes<
   S extends {
     agents: readonly PaneWords[];
-    shellPanes: readonly { terminalTitle?: string }[];
+    shellPanes: readonly PaneWords[];
   },
 >(snapshot: S): S {
-  return { ...snapshot, agents: snapshot.agents.map(maskPaneWords), shellPanes: snapshot.shellPanes.map(maskTerminalTitle) };
+  return { ...snapshot, agents: snapshot.agents.map(maskPaneWords), shellPanes: snapshot.shellPanes.map(maskPaneWords) };
 }
 
 /**

@@ -3,6 +3,7 @@ import { NARROW_VIEW, type SnapshotView } from "../sessions.ts";
 import { STATUS_RANK } from "../types.ts";
 import type { PaneWire, ServerSummary, SessionSummary, SnapshotResponse, TabView, WorkspaceView } from "../types.ts";
 import { INSTANCE_TOKEN } from "../walky/address.ts";
+import { isWalkableHeld, isWalkableHold, isWalkableSurface } from "./mask.ts";
 import type { PeerState } from "./registry.ts";
 
 // The ONE place the lead re-serialises (CREW_PROTOCOL.md §9.2). Everything else a crew link carries
@@ -110,8 +111,8 @@ export function parsePeerSnapshot(
   const tabs = Array.isArray(value.tabs) ? value.tabs : [];
   return {
     sessions: sessions.filter(isSessionSummary).slice(0, MAX_PEER_SESSIONS).map(untagSession),
-    agents: agents.filter(isPaneWire).slice(0, MAX_PEER_PANES).map(untagPane),
-    shellPanes: shellPanes.filter(isPaneWire).slice(0, MAX_PEER_PANES).map(untagPane),
+    agents: agents.filter(isPaneWire).slice(0, MAX_PEER_PANES).map(readablePane),
+    shellPanes: shellPanes.filter(isPaneWire).slice(0, MAX_PEER_PANES).map(readablePane),
     workspaces: workspaces.filter(isWorkspaceView).slice(0, MAX_PEER_WORKSPACES).map(untagWorkspace),
     tabs: tabs.filter(isTabView).slice(0, MAX_PEER_TABS).map(untagTab),
   };
@@ -426,6 +427,22 @@ function untagPane(p: PaneWire): PaneWire {
   return typeof instance === "string" && INSTANCE_TOKEN.test(instance) ? { ...rest, instance } : rest;
 }
 
+/**
+ * A peer's pane without a screen field the lead's mask cannot walk, then untagged. A member one release
+ * ahead may change the shape of its `surface`, `hold` or `held`; one this build cannot read is dropped
+ * here, as a bad `instance` is above, so the merged body never carries one the mask would pass over in
+ * clear or throw on (CREW_PROTOCOL.md §9.1, §10.2).
+ */
+function readablePane(p: JsonObject & PaneWire): PaneWire {
+  // Each field checked as the JSON it came off the wire as, not as the type it should be.
+  const wire: JsonObject = p;
+  const pane = { ...p };
+  if (wire.surface !== undefined && !isWalkableSurface(wire.surface)) delete pane.surface;
+  if (wire.hold !== undefined && !isWalkableHold(wire.hold)) delete pane.hold;
+  if (wire.held !== undefined && !isWalkableHeld(wire.held)) delete pane.held;
+  return untagPane(pane);
+}
+
 function untagWorkspace(w: WorkspaceView): WorkspaceView {
   const { host: _ignored, ...rest } = w;
   return rest;
@@ -475,7 +492,7 @@ function isSessionSummary(value: JsonValue | undefined): value is JsonValue & Se
   return typeof s.name === "string" && typeof s.reachable === "boolean";
 }
 
-function isPaneWire(value: JsonValue | undefined): value is JsonValue & PaneWire {
+function isPaneWire(value: JsonValue | undefined): value is JsonObject & PaneWire {
   if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) {
     return false;
   }
