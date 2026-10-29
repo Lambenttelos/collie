@@ -10,7 +10,10 @@ import { join } from "node:path";
 import { AuditLog } from "../audit.ts";
 import type { JsonValue } from "../../web/src/lib/json.ts";
 import { muxAck, muxGone, muxOk, muxRefused, type MuxAck, type MuxGrid, type MuxGridRequest, type MuxOutcome } from "../mux/types.ts";
-import { crewRouteFor } from "../crew/forward.ts";
+import { crewRouteFor, forwardToPeer, type ForwardTransport } from "../crew/forward.ts";
+import { maskForwardedAnswer } from "../crew/mask.ts";
+import type { PeerOutcome } from "../crew/peer-client.ts";
+import { DEFAULT_MAX_UPLOAD_BYTES } from "../uploads.ts";
 import { clearRoute, type ClearRouteRuntime } from "../server.ts";
 import { profileFor } from "../../web/src/lib/surface/profile.ts";
 import { boundedDraft, CLEAR_DRAFT_MAX_BYTES, type ClearReceipt } from "../../web/src/lib/surface/clear.ts";
@@ -363,6 +366,20 @@ describe("a Clear on a pane with a screen", () => {
   });
 });
 
+/** A member's answer to a phone's Clear, relayed by a crew lead (CREW_PROTOCOL.md §9.1), its mask on unless `leadMasks` is false. */
+function viaLead(member: Response, leadMasks = true): Promise<Response> {
+  const url = new URL("https://lead.example/api/pane/%251/clear?host=laptop");
+  const answered: PeerOutcome<Response> = { ok: true, value: member, status: member.status, member: "laptop", receivedAt: 1, date: null };
+  const transport: ForwardTransport = () => Promise.resolve(answered);
+  return forwardToPeer(new Request(url, { method: "POST", body: JSON.stringify({ requestId: ID }) }), url, {
+    link: { memberId: "laptop", address: "laptop.example:8787" },
+    state: { memberId: "laptop", health: "reachable", lastSeenAt: 1, reason: null, version: "1.25.0", conflict: null, preflight: null },
+    maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
+    transport,
+    mask: leadMasks ? maskForwardedAnswer : undefined,
+  });
+}
+
 describe("the cleared text rides on the receipt, for Restore", () => {
   test("a refusal carries no text; a replay carries the same text", async () => {
     const { clear } = rig(DRAFT);
@@ -381,6 +398,18 @@ describe("the cleared text rides on the receipt, for Restore", () => {
     expect(masked.lines.join("\n")).not.toContain("abcDEF123xyz");
     const plain = rig(DRAFT);
     expect((await receipt(await plain.clear("%1", { requestId: ID }, true))).draft).toBe(DRAFT);
+  });
+
+  test("through a crew lead that masks, a member's text that holds one goes without, whatever the member's own switch", async () => {
+    const secret = "token=abcDEF123xyz";
+    for (const memberMasks of [false, true]) {
+      const member = await rig(secret).clear("%1", { requestId: ID }, memberMasks);
+      expect(await receipt(await viaLead(member))).toEqual({ requestId: ID, outcome: "cleared" });
+    }
+    // A plain text keeps its draft through the lead, so a member's pane still offers Restore.
+    expect((await receipt(await viaLead(await rig(DRAFT).clear("%1", { requestId: ID })))).draft).toBe(DRAFT);
+    // Both switches off: the text rides on.
+    expect((await receipt(await viaLead(await rig(secret).clear("%1", { requestId: ID }), false))).draft).toBe(secret);
   });
 
   test("the text is one line, cut to 8 KiB on a character boundary", () => {

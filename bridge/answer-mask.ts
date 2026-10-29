@@ -1,14 +1,17 @@
 // ── ONE MASK PER ANSWER, WHICHEVER BRIDGE MADE THE ANSWER ───────────────────────────────────────
 // The answers that carry text a pane or an agent wrote, each with the mask `bridge/redact.ts` puts on
 // it before a phone reads it: the mirror, a History page, a Chat body, a Changes diff, a Files body,
-// and a pane's program-set title in the snapshot. Two callers use them and must agree to the byte:
-// this bridge's own routes (server.ts), when the answer is made here, and a crew lead re-masking what
-// a member sent (`bridge/crew/mask.ts`), because a member one release behind sent it unmasked. One
-// function per answer, so the two cannot drift: a field masked here is masked on both paths.
+// a pane's program-set title in the snapshot, and a Clear's receipt. Two callers use them and must
+// agree to the byte: this bridge's own routes (server.ts), when the answer is made here, and a crew
+// lead re-masking what a member sent (`bridge/crew/mask.ts`), because a member one release behind,
+// or with its own mask off, sent it unmasked. One function per answer, so the two cannot drift: a
+// field masked here is masked on both paths.
 //
 // Every mask is the same width as what it hides, and the mask character matches no pattern, so
 // running one of these over its own output changes nothing. That is what lets a lead mask a member's
-// answer whatever the member's version: a 1.18 member's answer comes back byte for byte.
+// answer whatever the member's version: a 1.18 member's answer comes back byte for byte. A Clear's
+// receipt is the one exception to the width: its text is dropped, not masked, and a receipt without
+// it comes back as it is.
 //
 // Pure: no disk, no clock, no config. The `COLLIE_REDACT` switch is the caller's.
 
@@ -123,4 +126,14 @@ export function maskSnapshotTitles<
  */
 export function maskSentAnswer<T extends { entries: readonly { line: string }[] }>(answer: T): T {
   return { ...answer, entries: answer.entries.map((entry) => ({ ...entry, line: redactText(entry.line) })) };
+}
+
+/**
+ * A Clear's receipt (ADR 0116) with its `draft` dropped when the mask would change it. Restore types
+ * the draft back into the box, so a masked one would type the mask. A draft with nothing to mask, and
+ * a receipt with none, are the receipt itself.
+ */
+export function maskClearReceipt<T extends { draft?: string }>(receipt: T): T | Omit<T, "draft"> {
+  const { draft, ...bare } = receipt;
+  return draft === undefined || redactText(draft) === draft ? receipt : bare;
 }

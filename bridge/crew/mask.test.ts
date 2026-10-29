@@ -4,7 +4,7 @@
 // Placeholders only: the fake key is built at run time, so no key shape sits in this file.
 import { describe, expect, test } from "bun:test";
 
-import { maskChatBody, maskDiff, maskFileBody, maskHistoryPage, maskPaneRead, maskSnapshotTitles, maskTodoList } from "../answer-mask.ts";
+import { maskChatBody, maskClearReceipt, maskDiff, maskFileBody, maskHistoryPage, maskPaneRead, maskSnapshotTitles, maskTodoList } from "../answer-mask.ts";
 import type { ChatWindowBody } from "../journal/live.ts";
 import type { TranscriptEntry } from "../journal/types.ts";
 import type { ChangeDiff, FileReadAnswer, PaneReadResponse } from "../types.ts";
@@ -56,14 +56,16 @@ function member(body: string | Uint8Array | null, status = 200, contentType = "a
   return { transport, seen };
 }
 
-/** One request through the lead, the mask on unless `mask` says otherwise. */
+/** One request through the lead, the mask on unless `mask` says otherwise; a `body` makes it a POST. */
 function viaLead(
   path: string,
   transport: ForwardTransport,
-  opts: { mask?: ForwardDeps["mask"]; headers?: Record<string, string> } = { mask: maskForwardedAnswer },
+  opts: { mask?: ForwardDeps["mask"]; headers?: Record<string, string>; body?: string } = { mask: maskForwardedAnswer },
 ) {
   const url = new URL(`https://lead.example${path}${path.includes("?") ? "&" : "?"}host=laptop`);
-  return forwardToPeer(new Request(url, { headers: opts.headers ?? {} }), url, {
+  const headers = opts.headers ?? {};
+  const init: RequestInit = opts.body === undefined ? { headers } : { method: "POST", headers, body: opts.body };
+  return forwardToPeer(new Request(url, init), url, {
     link: LINK,
     state: REACHABLE,
     maxUploadBytes: DEFAULT_MAX_UPLOAD_BYTES,
@@ -119,7 +121,7 @@ const diff: ChangeDiff = {
 const fileText: FileReadAnswer = { available: true, root: "/home/a/p", path: ".env", size: 80, binary: false, truncated: false, text: `KEY=${key}\n` };
 
 describe("which answers the lead masks", () => {
-  test("the mirror, History, Chat, Changes and Files, by pane and by space; never a picture or a blob", () => {
+  test("the mirror, History, Chat, Changes and Files, by pane and by space, and a Clear's receipt; never a picture or a blob", () => {
     expect(textAnswerOf("pane/w1%3Ap1")).toBe("pane");
     expect(textAnswerOf("pane/w1%3Ap1/history")).toBe("history");
     expect(textAnswerOf("pane/w1%3Ap1/chat")).toBe("chat");
@@ -127,6 +129,7 @@ describe("which answers the lead masks", () => {
     expect(textAnswerOf("workspace/w1/changes")).toBe("changes");
     expect(textAnswerOf("pane/w1%3Ap1/files")).toBe("files");
     expect(textAnswerOf("workspace/w1/files")).toBe("files");
+    expect(textAnswerOf("pane/w1%3Ap1/clear")).toBe("clear");
     for (const route of ["pane/w1/files/image", "workspace/w1/files/image", `blobs/${"ab".repeat(32)}`, "launchers", "folders", "pane/w1/reply", "tab"]) {
       expect(textAnswerOf(route)).toBeNull();
     }
@@ -185,6 +188,8 @@ describe("a member's key reaches the phone masked through the lead", () => {
     expect(maskForwardedAnswer("chat", JSON.stringify(chat))).toBe(JSON.stringify(maskChatBody(chat)));
     expect(maskForwardedAnswer("changes", JSON.stringify(diff))).toBe(JSON.stringify(maskDiff(diff, true)));
     expect(maskForwardedAnswer("files", JSON.stringify(fileText))).toBe(JSON.stringify(maskFileBody(fileText, true)));
+    const clearReceipt = { requestId: "clear-req-0001", outcome: "cleared", draft: `export OPENAI_API_KEY=${key}` };
+    expect(maskForwardedAnswer("clear", JSON.stringify(clearReceipt))).toBe(JSON.stringify(maskClearReceipt(clearReceipt)));
   });
 
   test("the phone asked for gzip: the masked bytes are what is compressed", async () => {
@@ -275,6 +280,7 @@ describe("fail closed: a body that should be masked and cannot be is never passe
     ["a History answer with no availability", "/api/pane/w1:p1/history", JSON.stringify({ entries: [entry] })],
     ["a diff that is not a string", "/api/pane/w1:p1/changes", JSON.stringify({ ...diff, diff: [key] })],
     ["a file text that is not a string", "/api/pane/w1:p1/files", JSON.stringify({ ...fileText, text: { t: key } })],
+    ["a Clear's draft that is not a string", "/api/pane/w1:p1/clear", JSON.stringify({ requestId: "clear-req-0001", outcome: "cleared", draft: [key] })],
   ];
   for (const [name, path, body] of broken) {
     test(name, async () => {
@@ -288,6 +294,37 @@ describe("fail closed: a body that should be masked and cannot be is never passe
       expect(refusal.host).toBe("laptop");
     });
   }
+});
+
+// A Clear's receipt (ADR 0116) carries the box's text for Restore, which types it back. A masked
+// draft would type the mask, so where the mask is on a draft that holds a secret goes, whole.
+describe("a Clear's receipt through the lead: a draft that holds a secret goes", () => {
+  const tap = '{"requestId":"clear-req-0001"}';
+  const cleared = (draft?: string): string =>
+    JSON.stringify(draft === undefined ? { requestId: "clear-req-0001", outcome: "cleared" } : { requestId: "clear-req-0001", outcome: "cleared", draft });
+
+  test("a member that does not mask: the phone gets the receipt without its draft, as from the lead's own pane", async () => {
+    const res = await viaLead("/api/pane/w1:p1/clear", member(cleared(`export OPENAI_API_KEY=${key}`)).transport, { mask: maskForwardedAnswer, body: tap });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe(cleared());
+  });
+
+  test("a draft with nothing to mask rides on; a receipt with no draft and a refusal are the member's own bytes", async () => {
+    // Spacing a re-serialisation would drop: proof the bytes were handed back, not rebuilt.
+    const refused = '{"requestId":"clear-req-0001", "outcome":"refused", "reason":"no_draft"}';
+    for (const body of [cleared("half a thought"), cleared(), refused]) {
+      const res = await viaLead("/api/pane/w1:p1/clear", member(body).transport, { mask: maskForwardedAnswer, body: tap });
+      expect(await res.text()).toBe(body);
+    }
+  });
+
+  test("the lead's mask off: the member's receipt is its own bytes, draft and all", async () => {
+    const body = cleared(`export OPENAI_API_KEY=${key}`);
+    const { transport, seen } = member(body);
+    const res = await viaLead("/api/pane/w1:p1/clear", transport, { mask: undefined, body: tap });
+    expect(seen.pulls).toBe(0);
+    expect(await res.text()).toBe(body);
+  });
 });
 
 describe("the merged snapshot's titles", () => {

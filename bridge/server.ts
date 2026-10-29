@@ -169,6 +169,7 @@ import { parseAnswerBody, type AskReply } from "../web/src/lib/surface/ask.ts";
 import { REQUEST_ID, RETURNED_CARD_DROPPED, reservedLead, SEND_MODES, SEND_WHENS, type HeldCancelAnswer, type SendAnswer, type SendReceiptsAnswer } from "../web/src/lib/surface/send.ts";
 import {
   maskChatBody,
+  maskClearReceipt,
   maskDiff,
   maskFileBody,
   maskHistoryPage,
@@ -8052,9 +8053,7 @@ export async function clearRoute(
   if (harness === null) return json({ requestId, outcome: "refused", reason: "pane_gone" }, context.acceptEncoding, 404);
   const answer = await rt.clear.handle(requestId, paneId, harness);
   if (answer.kind === "id_reused") return json({ requestId, outcome: "refused", reason: "request-id-reused" }, context.acceptEncoding, 409);
-  const { receipt: full } = answer;
-  const { draft, ...bare } = full;
-  const receipt = draft === undefined || (context.redact === true && redactText(draft) !== draft) ? bare : full;
+  const receipt = context.redact === true ? maskClearReceipt(answer.receipt) : answer.receipt;
   // Named fields only: the draft never reaches the audit line.
   const detail: AuditDetail = { requestId, outcome: receipt.outcome, replayed: answer.replayed, pressed: answer.pressed };
   if (receipt.reason !== undefined) detail.reason = receipt.reason;

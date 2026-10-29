@@ -1,5 +1,6 @@
 import {
   maskChatBody,
+  maskClearReceipt,
   maskDiff,
   maskFileBody,
   maskHistoryPage,
@@ -73,12 +74,21 @@ function maskBody(answer: TextAnswer, body: JsonObject, raw: string): string | n
       return isFileText(body) ? JSON.stringify(maskFileBody(body, true)) : null;
     case "sent":
       return isSentAnswer(body) ? JSON.stringify(maskSentAnswer(body)) : null;
+    case "clear":
+      // A refusal, and a receipt for a box that held no text, carry nothing to mask.
+      if (!("draft" in body)) return raw;
+      return isClearReceipt(body) ? JSON.stringify(maskClearReceipt(body)) : null;
   }
 }
 
 /** A Sent answer (ADR 0107) as deep as its mask reads it: an `entries` list whose every `line` is a string. */
 function isSentAnswer(body: JsonObject): body is JsonObject & { entries: { line: string }[] } {
   return Array.isArray(body.entries) && body.entries.every((entry) => isObject(entry) && typeof entry.line === "string");
+}
+
+/** A Clear's receipt (ADR 0116) as deep as its mask reads it: a `draft` string. */
+function isClearReceipt(body: JsonObject): body is JsonObject & { draft: string } {
+  return typeof body.draft === "string";
 }
 
 function isObject(value: JsonValue | undefined): value is JsonObject {
